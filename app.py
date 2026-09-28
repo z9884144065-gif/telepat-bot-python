@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import threading
 from flask import Flask
@@ -15,56 +16,91 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Счётчики для уведомлений: {"chat_id:user_id": count}
 notify_counters = {}
 
-def get_notify_every_n(chat_id):
-    """Сколько сообщений пропустить между уведомлениями. По умолчанию 1."""
+def has_letters(text):
+    """Проверяет, есть ли в тексте буквы (не только эмодзи/знаки)."""
+    return bool(re.search(r'[a-zA-Zа-яА-ЯёЁ]', text))
+
+def get_chat_settings(chat_id):
+    """Читает настройки чата из базы."""
     try:
-        result = supabase.table('chat_rewards').select('notify_every_n').eq('chat_id', str(chat_id)).maybe_single().execute()
-        if result.data and result.data.get('notify_every_n'):
-            return int(result.data['notify_every_n'])
+        r = supabase.table('chat_rewards').select('*').eq('chat_id', str(chat_id)).maybe_single().execute()
+        return r.data if r.data else {}
     except Exception as e:
-        print(f"get_notify_every_n error: {e}", flush=True)
-    return 1
+        print(f"SETTINGS ERROR: {e}", flush=True)
+        return {}
 
 async def handle_message(update, context):
     try:
         msg = update.effective_message
         if not msg or not msg.text: return
-        if msg.text.startswith('/'): return
         if msg.chat.type not in ('group', 'supergroup'): return
         
         user_id = msg.from_user.id
         chat_id = msg.chat.id
-        key = f"{chat_id}:{user_id}"
+        text = msg.text.strip()
         
-        # Всегда начисляем за КАЖДОЕ сообщение
-        try:
-            result = supabase.rpc('add_chat_reward', {
-                'p_telegram_id': str(user_id),
-                'p_chat_id': str(chat_id)
-            }).execute()
-            
-            if not (result.data and result.data.get('ok')):
-                print(f"REWARD skipped: {result.data}", flush=True)
-                return
-            
-            reward = result.data.get('reward', 0)
-            token = result.data.get('token', 'TUSD')
-            
-            # Решаем, писать ли ответ в чат
-            notify_every = get_notify_every_n(chat_id)
-            current = notify_counters.get(key, 0) + 1
-            
-            if current >= notify_every:
-                notify_counters[key] = 0
-                await msg.reply_text(f"✅ Вам начислено {reward} {token} за активность!")
-                print(f"REWARD+REPLY to {user_id}: {reward} {token}", flush=True)
-            else:
-                notify_counters[key] = current
-                print(f"REWARD silent to {user_id}: {reward} {token} ({current}/{notify_every})", flush=True)
-        except Exception as e:
-            print(f"REWARD ERROR: {e}", flush=True)
+        print(f"MSG from {user_id} in {chat_id}: '{text[:30]}'", flush=True)
+        
+        settings = get_chat_settings(chat_id)
+        if not settings:
+            print(f"NO SETTINGS for chat {chat_id}", flush=True)
+            return
+        
+        if not settings.get('enabled', True):
+            print(f"CHAT DISABLED: {chat_id}", flush=True)
+            return
+        
+        # === Проверки контента ===
+        if settings.get('exclude_commands', True) and text.startswith('/'):
+            print(f"SKIP command", flush=True)
+            return
+        
+        min_chars = settings.get('min_chars', 0) or 0
+        if min_chars and len(text) < min_chars:
+            print(f"SKIP: short ({len(text)}<{min_chars})", flush=True)
+            return
+        
+        min_words = settings.get('min_words', 0) or 0
+        if min_words and len(text.split()) < min_words:
+            print(f"SKIP: few words", flush=True)
+            return
+        
+        if settings.get('exclude_emoji_only', False) and not has_letters(text):
+            print(f"SKIP: emoji only", flush=True)
+            return
+        
+        # === Вызываем RPC (там все лимиты: кулдаун, дневные лимиты) ===
+        result = supabase.rpc('add_chat_reward', {
+            'p_telegram_id': str(user_id),
+            'p_chat_id': str(chat_id)
+        }).execute()
+        
+        if not (result.data and result.data.get('ok')):
+            reason = (result.data or {}).get('error', 'unknown')
+            print(f"SKIP RPC: {reason}", flush=True)
+            return
+        
+        reward = result.data.get('reward', 0)
+        token = result.data.get('token', 'TUSD')
+        notify_every = result.data.get('notify_every_n', 1) or 1
+        
+        print(f"REWARD OK: +{reward} {token} to {user_id}", flush=True)
+        
+        # Счётчик для уведомлений
+        key = f"{chat_id}:{user_id}"
+        current = notify_counters.get(key, 0) + 1
+        
+        if current >= notify_every:
+            notify_counters[key] = 0
+            await msg.reply_text(f"✅ Вам начислено {reward} {token} за активность!")
+            print(f"REPLY sent to {user_id}", flush=True)
+        else:
+            notify_counters[key] = current
+            print(f"silent ({current}/{notify_every})", flush=True)
     except Exception as e:
         print(f"HANDLE ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 def run_bot():
     try:
