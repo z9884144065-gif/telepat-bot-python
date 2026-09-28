@@ -13,15 +13,25 @@ SUPABASE_URL = 'https://jutszxuzjzyfxarceydw.supabase.co'
 SUPABASE_KEY = 'sb_publishable_geRczpRc3faUHRGto2ue7A_eFFiJDwO'
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Счётчики для уведомлений: {"chat_id:user_id": count}
 notify_counters = {}
 
 def has_letters(text):
-    """Проверяет, есть ли в тексте буквы (не только эмодзи/знаки)."""
     return bool(re.search(r'[a-zA-Zа-яА-ЯёЁ]', text))
 
+def ensure_chat_exists(chat_id):
+    """Создаёт запись в chat_rewards, если её ещё нет."""
+    try:
+        r = supabase.table('chat_rewards').select('chat_id').eq('chat_id', str(chat_id)).maybe_single().execute()
+        if not r.data:
+            supabase.table('chat_rewards').insert({'chat_id': str(chat_id)}).execute()
+            print(f"CREATED new chat row: {chat_id}", flush=True)
+            return True
+        return False
+    except Exception as e:
+        print(f"ensure_chat_exists error: {e}", flush=True)
+        return False
+
 def get_chat_settings(chat_id):
-    """Читает настройки чата из базы."""
     try:
         r = supabase.table('chat_rewards').select('*').eq('chat_id', str(chat_id)).maybe_single().execute()
         return r.data if r.data else {}
@@ -41,16 +51,15 @@ async def handle_message(update, context):
         
         print(f"MSG from {user_id} in {chat_id}: '{text[:30]}'", flush=True)
         
+        # === СНАЧАЛА ГАРАНТИРУЕМ, ЧТО ЧАТ ЕСТЬ В БАЗЕ ===
+        ensure_chat_exists(chat_id)
+        
         settings = get_chat_settings(chat_id)
-        if not settings:
-            print(f"NO SETTINGS for chat {chat_id}", flush=True)
-            return
         
         if not settings.get('enabled', True):
             print(f"CHAT DISABLED: {chat_id}", flush=True)
             return
         
-        # === Проверки контента ===
         if settings.get('exclude_commands', True) and text.startswith('/'):
             print(f"SKIP command", flush=True)
             return
@@ -69,7 +78,6 @@ async def handle_message(update, context):
             print(f"SKIP: emoji only", flush=True)
             return
         
-        # === Вызываем RPC (там все лимиты: кулдаун, дневные лимиты) ===
         result = supabase.rpc('add_chat_reward', {
             'p_telegram_id': str(user_id),
             'p_chat_id': str(chat_id)
@@ -86,7 +94,6 @@ async def handle_message(update, context):
         
         print(f"REWARD OK: +{reward} {token} to {user_id}", flush=True)
         
-        # Счётчик для уведомлений
         key = f"{chat_id}:{user_id}"
         current = notify_counters.get(key, 0) + 1
         
@@ -96,7 +103,6 @@ async def handle_message(update, context):
             print(f"REPLY sent to {user_id}", flush=True)
         else:
             notify_counters[key] = current
-            print(f"silent ({current}/{notify_every})", flush=True)
     except Exception as e:
         print(f"HANDLE ERROR: {e}", flush=True)
         import traceback
