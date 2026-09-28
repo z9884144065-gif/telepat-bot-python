@@ -2,9 +2,74 @@ import os
 import asyncio
 import threading
 from flask import Flask
-from telegram.ext import ApplicationBuilder
+from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from supabase import create_client
 
 app = Flask(__name__)
+
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+SUPABASE_URL = 'https://jutszxuzjzyfxarceydw.supabase.co'
+SUPABASE_KEY = 'sb_publishable_geRczpRc3faUHRGto2ue7A_eFFiJDwO'
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Счётчики сообщений в памяти: {"chat_id:user_id": count}
+message_counters = {}
+
+# Сколько сообщений нужно для награды
+MESSAGES_PER_REWARD = 3
+
+async def handle_message(update, context):
+    try:
+        msg = update.effective_message
+        if not msg or not msg.text: return
+        if msg.text.startswith('/'): return
+        if msg.chat.type not in ('group', 'supergroup'): return
+        
+        user_id = msg.from_user.id
+        chat_id = msg.chat.id
+        key = f"{chat_id}:{user_id}"
+        
+        current = message_counters.get(key, 0) + 1
+        
+        if current >= MESSAGES_PER_REWARD:
+            message_counters[key] = 0
+            try:
+                result = supabase.rpc('add_chat_reward', {
+                    'p_telegram_id': str(user_id),
+                    'p_chat_id': str(chat_id)
+                }).execute()
+                
+                if result.data and result.data.get('ok'):
+                    reward = result.data.get('reward', 0)
+                    token = result.data.get('token', 'TUSD')
+                    await msg.reply_text(
+                        f"✅ Вам начислено {reward} {token} за активность!"
+                    )
+                    print(f"Reward to {user_id}: {reward} {token}")
+            except Exception as e:
+                print(f"Ошибка начисления: {e}")
+        else:
+            message_counters[key] = current
+    except Exception as e:
+        print(f"Ошибка обработки: {e}")
+
+def run_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def bot_main():
+        application = ApplicationBuilder().token(BOT_TOKEN).build()
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        print("Bot started...")
+        while True:
+            await asyncio.sleep(3600)
+    
+    loop.run_until_complete(bot_main())
+
+threading.Thread(target=run_bot, daemon=True).start()
 
 @app.route('/')
 def home():
@@ -13,16 +78,6 @@ def home():
 @app.route('/health')
 def health():
     return "OK"
-
-def run_bot():
-    async def bot_main():
-        application = ApplicationBuilder().token(os.environ['BOT_TOKEN']).build()
-        print("Bot started...")
-        await application.run_polling(stop_signals=None)
-    
-    asyncio.run(bot_main())
-
-threading.Thread(target=run_bot, daemon=True).start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
