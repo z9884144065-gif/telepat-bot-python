@@ -2,8 +2,9 @@ import os
 import re
 import asyncio
 import threading
-from flask import Flask
+from flask import Flask, request, jsonify
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from telegram import Bot
 from supabase import create_client
 
 app = Flask(__name__)
@@ -18,29 +19,25 @@ notify_counters = {}
 def has_letters(text):
     return bool(re.search(r'[a-zA-Zа-яА-ЯёЁ]', text))
 
-def ensure_chat_exists(chat_id, chat_title=None):
-    """Создаёт запись в chat_rewards, если её нет. Обновляет название чата."""
-    try:
-        r = supabase.table('chat_rewards').select('chat_id, chat_title').eq('chat_id', str(chat_id)).maybe_single().execute()
-        if not r.data:
-            supabase.table('chat_rewards').insert({
-                'chat_id': str(chat_id),
-                'chat_title': chat_title or str(chat_id)
-            }).execute()
-            print(f"CREATED new chat row: {chat_id} ({chat_title})", flush=True)
-        elif chat_title and r.data.get('chat_title') != chat_title:
-            supabase.table('chat_rewards').update({'chat_title': chat_title}).eq('chat_id', str(chat_id)).execute()
-            print(f"UPDATED chat title: {chat_id} -> {chat_title}", flush=True)
-    except Exception as e:
-        print(f"ensure_chat_exists error: {e}", flush=True)
-
 def get_chat_settings(chat_id):
     try:
         r = supabase.table('chat_rewards').select('*').eq('chat_id', str(chat_id)).maybe_single().execute()
         return r.data if r.data else {}
     except Exception as e:
-        print(f"SETTINGS ERROR: {e}", flush=True)
         return {}
+
+def ensure_chat_exists(chat_id, chat_title):
+    try:
+        r = supabase.table('chat_rewards').select('chat_id').eq('chat_id', str(chat_id)).maybe_single().execute()
+        if not r.data:
+            supabase.table('chat_rewards').insert({
+                'chat_id': str(chat_id),
+                'chat_title': chat_title or str(chat_id)
+            }).execute()
+        else:
+            supabase.table('chat_rewards').update({'chat_title': chat_title}).eq('chat_id', str(chat_id)).execute()
+    except Exception as e:
+        print(f"ensure_chat_exists error: {e}", flush=True)
 
 async def handle_message(update, context):
     try:
@@ -53,45 +50,30 @@ async def handle_message(update, context):
         chat_title = msg.chat.title
         text = msg.text.strip()
         
-        print(f"MSG from {user_id} in {chat_id} ({chat_title}): '{text[:30]}'", flush=True)
-        
         ensure_chat_exists(chat_id, chat_title)
-        
         settings = get_chat_settings(chat_id)
         
-        if not settings.get('enabled', True):
-            print(f"CHAT DISABLED: {chat_id}", flush=True)
-            return
-        
-        if settings.get('exclude_commands', True) and text.startswith('/'):
-            return
+        if not settings.get('enabled', True): return
+        if settings.get('exclude_commands', True) and text.startswith('/'): return
         
         min_chars = settings.get('min_chars', 0) or 0
-        if min_chars and len(text) < min_chars:
-            return
+        if min_chars and len(text) < min_chars: return
         
         min_words = settings.get('min_words', 0) or 0
-        if min_words and len(text.split()) < min_words:
-            return
+        if min_words and len(text.split()) < min_words: return
         
-        if settings.get('exclude_emoji_only', False) and not has_letters(text):
-            return
+        if settings.get('exclude_emoji_only', False) and not has_letters(text): return
         
         result = supabase.rpc('add_chat_reward', {
             'p_telegram_id': str(user_id),
             'p_chat_id': str(chat_id)
         }).execute()
         
-        if not (result.data and result.data.get('ok')):
-            reason = (result.data or {}).get('error', 'unknown')
-            print(f"SKIP RPC: {reason}", flush=True)
-            return
+        if not (result.data and result.data.get('ok')): return
         
         reward = result.data.get('reward', 0)
         token = result.data.get('token', 'TUSD')
         notify_every = result.data.get('notify_every_n', 1) or 1
-        
-        print(f"REWARD OK: +{reward} {token} to {user_id}", flush=True)
         
         key = f"{chat_id}:{user_id}"
         current = notify_counters.get(key, 0) + 1
@@ -103,8 +85,100 @@ async def handle_message(update, context):
             notify_counters[key] = current
     except Exception as e:
         print(f"HANDLE ERROR: {e}", flush=True)
+
+def extract_chat_username(link):
+    """Извлекает @username из ссылки вида https://t.me/xxx"""
+    if not link: return None
+    m = re.search(r't\.me/([a-zA-Z0-9_]+)', link)
+    if not m: return None
+    name = m.group(1)
+    if name in ('+', 'joinchat', 'c'): return None
+    return '@' + name
+
+@app.route('/check_task', methods=['POST'])
+def check_task():
+    """Проверяет подписку через Telegram API и начисляет награду."""
+    try:
+        data = request.get_json()
+        task_id = data.get('task_id')
+        user_id = data.get('user_id')
+        
+        if not task_id or not user_id:
+            return jsonify({'ok': False, 'error': 'Missing params'}), 400
+        
+        task_r = supabase.table('tasks').select('*').eq('id', task_id).maybe_single().execute()
+        if not task_r.data:
+            return jsonify({'ok': False, 'error': 'Задание не найдено'})
+        
+        task = task_r.data
+        if task.get('status') != 'approved':
+            return jsonify({'ok': False, 'error': 'Задание не активно'})
+        
+        if task.get('limit_count', 0) > 0 and task.get('completed_count', 0) >= task['limit_count']:
+            return jsonify({'ok': False, 'error': 'Лимит выполнений исчерпан'})
+        
+        dup_r = supabase.table('task_completions').select('id').eq('task_id', task_id).eq('user_id', str(user_id)).execute()
+        if dup_r.data:
+            return jsonify({'ok': False, 'error': 'Вы уже выполняли это задание'})
+        
+        username = extract_chat_username(task.get('link'))
+        if not username:
+            return jsonify({'ok': False, 'error': 'Некорректная ссылка задания'})
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def check():
+            async with Bot(token=BOT_TOKEN) as b:
+                try:
+                    member = await b.get_chat_member(chat_id=username, user_id=int(user_id))
+                    return member.status
+                except Exception as e:
+                    print(f"CHECK ERROR: {e}", flush=True)
+                    return 'error'
+        
+        status = loop.run_until_complete(check())
+        loop.close()
+        
+        if status == 'error':
+            return jsonify({'ok': False, 'error': 'Бот не админ канала — проверка невозможна'})
+        if status in ('left', 'kicked'):
+            return jsonify({'ok': False, 'error': 'Вы не подписаны на канал/чат'})
+        
+        reward = float(task.get('reward', 0))
+        token = task.get('reward_token', 'TUSD')
+        creator_id = str(task.get('creator_id'))
+        
+        creator_r = supabase.table('users').select('*').eq('Ttelegram_id', creator_id).maybe_single().execute()
+        if not creator_r.data:
+            return jsonify({'ok': False, 'error': 'Рекламодатель не найден'})
+        
+        col = 'tg_balance' if token == 'TG' else ('ai_balance' if token == 'AI' else 'tusd_balance')
+        
+        creator_balance = float(creator_r.data.get(col) or 0)
+        if creator_balance < reward:
+            return jsonify({'ok': False, 'error': 'У рекламодателя недостаточно средств'})
+        
+        supabase.table('users').update({col: creator_balance - reward}).eq('Ttelegram_id', creator_id).execute()
+        
+        user_r = supabase.table('users').select(col).eq('Ttelegram_id', str(user_id)).maybe_single().execute()
+        user_balance = float((user_r.data or {}).get(col) or 0)
+        supabase.table('users').update({col: user_balance + reward}).eq('Ttelegram_id', str(user_id)).execute()
+        
+        supabase.table('task_completions').insert({
+            'task_id': task_id,
+            'user_id': str(user_id)
+        }).execute()
+        
+        supabase.table('tasks').update({'completed_count': task.get('completed_count', 0) + 1}).eq('id', task_id).execute()
+        
+        print(f"TASK OK: {user_id} +{reward} {token}", flush=True)
+        return jsonify({'ok': True, 'reward': reward, 'token': token})
+    except Exception as e:
+        print(f"CHECK_TASK ERROR: {e}", flush=True)
         import traceback
         traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 def run_bot():
     try:
@@ -125,8 +199,6 @@ def run_bot():
         loop.run_until_complete(bot_main())
     except Exception as e:
         print(f"BOT FATAL ERROR: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
 
 print("STARTING BOT THREAD...", flush=True)
 threading.Thread(target=run_bot, daemon=True).start()
