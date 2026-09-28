@@ -12,10 +12,18 @@ SUPABASE_URL = 'https://jutszxuzjzyfxarceydw.supabase.co'
 SUPABASE_KEY = 'sb_publishable_geRczpRc3faUHRGto2ue7A_eFFiJDwO'
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Счётчики сообщений: {"chat_id:user_id": count}
 message_counters = {}
 
-# ⭐ ЗА СКОЛЬКО СООБЩЕНИЙ НАЧИСЛЯТЬ (1 = за каждое)
-MESSAGES_PER_REWARD = 1
+def get_messages_per_reward(chat_id):
+    """Читает настройку из базы. По умолчанию = 1."""
+    try:
+        result = supabase.table('chat_rewards').select('messages_per_reward').eq('chat_id', str(chat_id)).maybe_single().execute()
+        if result.data and result.data.get('messages_per_reward'):
+            return int(result.data['messages_per_reward'])
+    except Exception as e:
+        print(f"get_messages_per_reward error: {e}", flush=True)
+    return 1
 
 async def handle_message(update, context):
     try:
@@ -29,9 +37,12 @@ async def handle_message(update, context):
         key = f"{chat_id}:{user_id}"
         
         current = message_counters.get(key, 0) + 1
-        print(f"MSG from {user_id} in {chat_id}: count={current}", flush=True)
         
-        if current >= MESSAGES_PER_REWARD:
+        need = get_messages_per_reward(chat_id)
+        
+        print(f"MSG from {user_id} in {chat_id}: {current}/{need}", flush=True)
+        
+        if current >= need:
             message_counters[key] = 0
             try:
                 result = supabase.rpc('add_chat_reward', {
