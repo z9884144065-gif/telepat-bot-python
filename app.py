@@ -18,18 +18,21 @@ notify_counters = {}
 def has_letters(text):
     return bool(re.search(r'[a-zA-Zа-яА-ЯёЁ]', text))
 
-def ensure_chat_exists(chat_id):
-    """Создаёт запись в chat_rewards, если её ещё нет."""
+def ensure_chat_exists(chat_id, chat_title=None):
+    """Создаёт запись в chat_rewards, если её нет. Обновляет название чата."""
     try:
-        r = supabase.table('chat_rewards').select('chat_id').eq('chat_id', str(chat_id)).maybe_single().execute()
+        r = supabase.table('chat_rewards').select('chat_id, chat_title').eq('chat_id', str(chat_id)).maybe_single().execute()
         if not r.data:
-            supabase.table('chat_rewards').insert({'chat_id': str(chat_id)}).execute()
-            print(f"CREATED new chat row: {chat_id}", flush=True)
-            return True
-        return False
+            supabase.table('chat_rewards').insert({
+                'chat_id': str(chat_id),
+                'chat_title': chat_title or str(chat_id)
+            }).execute()
+            print(f"CREATED new chat row: {chat_id} ({chat_title})", flush=True)
+        elif chat_title and r.data.get('chat_title') != chat_title:
+            supabase.table('chat_rewards').update({'chat_title': chat_title}).eq('chat_id', str(chat_id)).execute()
+            print(f"UPDATED chat title: {chat_id} -> {chat_title}", flush=True)
     except Exception as e:
         print(f"ensure_chat_exists error: {e}", flush=True)
-        return False
 
 def get_chat_settings(chat_id):
     try:
@@ -47,12 +50,12 @@ async def handle_message(update, context):
         
         user_id = msg.from_user.id
         chat_id = msg.chat.id
+        chat_title = msg.chat.title  # название чата
         text = msg.text.strip()
         
-        print(f"MSG from {user_id} in {chat_id}: '{text[:30]}'", flush=True)
+        print(f"MSG from {user_id} in {chat_id} ({chat_title}): '{text[:30]}'", flush=True)
         
-        # === СНАЧАЛА ГАРАНТИРУЕМ, ЧТО ЧАТ ЕСТЬ В БАЗЕ ===
-        ensure_chat_exists(chat_id)
+        ensure_chat_exists(chat_id, chat_title)
         
         settings = get_chat_settings(chat_id)
         
@@ -61,21 +64,17 @@ async def handle_message(update, context):
             return
         
         if settings.get('exclude_commands', True) and text.startswith('/'):
-            print(f"SKIP command", flush=True)
             return
         
         min_chars = settings.get('min_chars', 0) or 0
         if min_chars and len(text) < min_chars:
-            print(f"SKIP: short ({len(text)}<{min_chars})", flush=True)
             return
         
         min_words = settings.get('min_words', 0) or 0
         if min_words and len(text.split()) < min_words:
-            print(f"SKIP: few words", flush=True)
             return
         
         if settings.get('exclude_emoji_only', False) and not has_letters(text):
-            print(f"SKIP: emoji only", flush=True)
             return
         
         result = supabase.rpc('add_chat_reward', {
@@ -100,7 +99,6 @@ async def handle_message(update, context):
         if current >= notify_every:
             notify_counters[key] = 0
             await msg.reply_text(f"✅ Вам начислено {reward} {token} за активность!")
-            print(f"REPLY sent to {user_id}", flush=True)
         else:
             notify_counters[key] = current
     except Exception as e:
