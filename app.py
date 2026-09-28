@@ -37,7 +37,6 @@ async def handle_message(update, context):
         key = f"{chat_id}:{user_id}"
         
         current = message_counters.get(key, 0) + 1
-        
         need = get_messages_per_reward(chat_id)
         
         print(f"MSG from {user_id} in {chat_id}: {current}/{need}", flush=True)
