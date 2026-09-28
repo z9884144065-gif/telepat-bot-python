@@ -50,7 +50,7 @@ async def handle_message(update, context):
         
         user_id = msg.from_user.id
         chat_id = msg.chat.id
-        chat_title = msg.chat.title  # название чата
+        chat_title = msg.chat.title
         text = msg.text.strip()
         
         print(f"MSG from {user_id} in {chat_id} ({chat_title}): '{text[:30]}'", flush=True)
