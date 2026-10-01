@@ -16,9 +16,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 notify_counters = {}
 
-# Какие колонки в users соответствуют токенам.
-# Для новых токенов (VK, TGCOIN и т.д.) — либо добавить сюда,
-# либо перевести на telepat_token_balances.
+# Колонки в users для базовых токенов.
+# Для VKCOIN и других кастомных — работаем через telepat_token_balances.
 TOKEN_COLUMN = {
     'TG':   'tg_balance',
     'AI':   'ai_balance',
@@ -55,11 +54,25 @@ def ensure_chat_exists(chat_id, chat_title):
             .execute()
         )
         if not r.data:
+            # chat_rewards.reward_token_id — NOT NULL, поэтому
+            # при создании нового чата ставим дефолтный TUSD.
+            tusd = (
+                supabase.table('telepat_tokens')
+                .select('id')
+                .eq('symbol', 'TUSD')
+                .maybe_single()
+                .execute()
+            )
+            tusd_id = tusd.data.get('id') if tusd.data else None
             supabase.table('chat_rewards').insert({
                 'chat_id': str(chat_id),
-                'chat_title': chat_title or str(chat_id)
+                'chat_title': chat_title or str(chat_id),
+                'reward_token': 'TUSD',
+                'reward_token_id': tusd_id,
+                'reward': 0.0002,
+                'enabled': True,
             }).execute()
-            print(f"[ensure_chat_exists] created chat_rewards for {chat_id}", flush=True)
+            print(f"[ensure_chat_exists] created chat_rewards for {chat_id} (TUSD)", flush=True)
         else:
             supabase.table('chat_rewards').update(
                 {'chat_title': chat_title}
@@ -137,6 +150,63 @@ def extract_chat_username(link):
     return '@' + name
 
 
+def get_token_balance(telegram_id: int, token_symbol: str):
+    """Возвращает текущий баланс пользователя по токену."""
+    col = TOKEN_COLUMN.get(token_symbol)
+    if col:
+        r = (
+            supabase.table('users')
+            .select(col)
+            .eq('telegram_id', telegram_id)
+            .maybe_single()
+            .execute()
+        )
+        return float((r.data or {}).get(col) or 0)
+    # кастомный токен → telepat_token_balances
+    tok = (
+        supabase.table('telepat_tokens')
+        .select('id')
+        .eq('symbol', token_symbol)
+        .maybe_single()
+        .execute()
+    )
+    if not tok.data:
+        return 0.0
+    token_id = tok.data['id']
+    r = (
+        supabase.table('telepat_token_balances')
+        .select('balance')
+        .eq('telegram_id', telegram_id)
+        .eq('token_id', token_id)
+        .maybe_single()
+        .execute()
+    )
+    return float((r.data or {}).get('balance') or 0)
+
+
+def set_token_balance(telegram_id: int, token_symbol: str, value: float):
+    """Устанавливает баланс пользователя по токену."""
+    col = TOKEN_COLUMN.get(token_symbol)
+    if col:
+        supabase.table('users').update({col: value}).eq('telegram_id', telegram_id).execute()
+        return
+    tok = (
+        supabase.table('telepat_tokens')
+        .select('id')
+        .eq('symbol', token_symbol)
+        .maybe_single()
+        .execute()
+    )
+    if not tok.data:
+        return
+    token_id = tok.data['id']
+    supabase.table('telepat_token_balances').upsert({
+        'telegram_id': telegram_id,
+        'token_id': token_id,
+        'balance': value,
+    }, on_conflict='telegram_id,token_id').execute()
+
+
 @app.route('/check_task', methods=['POST'])
 def check_task():
     """Проверяет подписку через Telegram API и начисляет награду."""
@@ -204,42 +274,15 @@ def check_task():
         creator_id = int(task.get('creator_id'))
         user_id_int = int(user_id)
 
-        col = TOKEN_COLUMN.get(token)
-        if not col:
-            return jsonify({'ok': False, 'error': f'Задания на {token} пока не поддерживаются'})
-
         # --- Списываем у рекламодателя ---
-        creator_r = (
-            supabase.table('users')
-            .select(col)
-            .eq('telegram_id', creator_id)
-            .maybe_single()
-            .execute()
-        )
-        if not creator_r.data:
-            return jsonify({'ok': False, 'error': 'Рекламодатель не найден'})
-
-        creator_balance = float(creator_r.data.get(col) or 0)
+        creator_balance = get_token_balance(creator_id, token)
         if creator_balance < reward:
             return jsonify({'ok': False, 'error': 'У рекламодателя недостаточно средств'})
-
-        supabase.table('users').update(
-            {col: creator_balance - reward}
-        ).eq('telegram_id', creator_id).execute()
+        set_token_balance(creator_id, token, creator_balance - reward)
 
         # --- Начисляем получателю ---
-        user_r = (
-            supabase.table('users')
-            .select(col)
-            .eq('telegram_id', user_id_int)
-            .maybe_single()
-            .execute()
-        )
-        user_balance = float((user_r.data or {}).get(col) or 0)
-
-        supabase.table('users').update(
-            {col: user_balance + reward}
-        ).eq('telegram_id', user_id_int).execute()
+        user_balance = get_token_balance(user_id_int, token)
+        set_token_balance(user_id_int, token, user_balance + reward)
 
         # --- Отметки выполнения ---
         supabase.table('task_completions').insert({
