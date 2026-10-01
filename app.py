@@ -16,6 +16,9 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 notify_counters = {}
 
+# Сколько секунд держать ответ бота перед удалением
+REPLY_TTL_SECONDS = 10
+
 # Колонки в users для базовых токенов.
 # Для VKCOIN и других кастомных — работаем через telepat_token_balances.
 TOKEN_COLUMN = {
@@ -81,6 +84,16 @@ def ensure_chat_exists(chat_id, chat_title):
         print(f"ensure_chat_exists error: {e}", flush=True)
 
 
+async def delete_later(bot, chat_id: int, message_id: int, delay: int = REPLY_TTL_SECONDS):
+    """Удаляет сообщение бота через delay секунд."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        # Если бот не админ или сообщение уже удалено — просто логируем.
+        print(f"delete_later error: {e}", flush=True)
+
+
 async def handle_message(update, context):
     try:
         msg = update.effective_message
@@ -130,7 +143,9 @@ async def handle_message(update, context):
 
         if current >= notify_every:
             notify_counters[key] = 0
-            await msg.reply_text(f"✅ Вам начислено {reward} {token} за активность!")
+            sent = await msg.reply_text(f"✅ Вам начислено {reward} {token} за активность!")
+            # авто-удаление ответа через REPLY_TTL_SECONDS секунд
+            asyncio.create_task(delete_later(context.bot, chat_id, sent.message_id))
         else:
             notify_counters[key] = current
     except Exception as e:
