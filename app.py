@@ -4,7 +4,7 @@ import asyncio
 import threading
 import requests
 from flask import Flask, request, jsonify
-from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
 from supabase import create_client
 
 app = Flask(__name__)
@@ -84,6 +84,52 @@ async def delete_later(bot, chat_id: int, message_id: int, delay: int = REPLY_TT
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception as e:
         print(f"delete_later error: {e}", flush=True)
+
+
+# ==================== /start — ПРИВЯЗКА РЕФЕРАЛА ====================
+async def start_command(update, context):
+    """Обработчик /start <referrer_id> — привязка реферала навсегда."""
+    try:
+        msg = update.effective_message
+        user = msg.from_user
+        if not user:
+            return
+
+        user_id = user.id
+
+        # 1) создаём пользователя если его нет
+        try:
+            supabase.rpc('ensure_user_exists', {'p_telegram_id': user_id}).execute()
+        except Exception as e:
+            print(f"[start] ensure_user_exists error: {e}", flush=True)
+
+        # 2) если пришёл параметр — это реферальный ID
+        if context.args and len(context.args) > 0:
+            raw = (context.args[0] or '').strip()
+            try:
+                referrer_id = int(raw)
+            except (ValueError, TypeError):
+                referrer_id = None
+
+            if referrer_id and referrer_id != user_id:
+                try:
+                    r = supabase.rpc('set_referrer', {
+                        'p_user_id': user_id,
+                        'p_referrer_id': referrer_id,
+                    }).execute()
+                    print(f"[start] set_referrer {user_id} -> {referrer_id}: {r.data}", flush=True)
+                except Exception as e:
+                    print(f"[start] set_referrer error: {e}", flush=True)
+
+        # 3) приветствие
+        name = user.first_name or 'друг'
+        await msg.reply_text(
+            f"👑 Привет, {name}!\n\n"
+            f"Добро пожаловать в TELEPAT.\n"
+            f"Открой приложение кнопкой ниже 👇"
+        )
+    except Exception as e:
+        print(f"[start] fatal: {e}", flush=True)
 
 
 async def handle_message(update, context):
@@ -319,21 +365,23 @@ def run_flask():
 async def bot_main():
     print("BOT INIT START...", flush=True)
     application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # /start — обработчик рефералов и приветствия
+    application.add_handler(CommandHandler('start', start_command))
+    # остальные текстовые сообщения (в группах)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
     print("Bot started...", flush=True)
-    # держим event loop живым вечно
     await asyncio.Event().wait()
 
 
 if __name__ == '__main__':
-    # Flask — в фоновом daemon-потоке
     print("STARTING FLASK THREAD...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Polling — в ГЛАВНОМ потоке (это критично для PTB v20+)
     print("STARTING BOT POLLING...", flush=True)
     try:
         asyncio.run(bot_main())
