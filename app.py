@@ -28,56 +28,6 @@ def has_letters(text):
     return bool(re.search(r'[a-zA-Zа-яА-ЯёЁ]', text))
 
 
-def get_chat_settings(chat_id):
-    try:
-        r = (
-            supabase.table('chat_rewards')
-            .select('*')
-            .eq('chat_id', str(chat_id))
-            .maybe_single()
-            .execute()
-        )
-        return r.data if r.data else {}
-    except Exception as e:
-        print(f"get_chat_settings error: {e}", flush=True)
-        return {}
-
-
-def ensure_chat_exists(chat_id, chat_title):
-    try:
-        r = (
-            supabase.table('chat_rewards')
-            .select('chat_id')
-            .eq('chat_id', str(chat_id))
-            .maybe_single()
-            .execute()
-        )
-        if not r.data:
-            tusd = (
-                supabase.table('telepat_tokens')
-                .select('id')
-                .eq('symbol', 'TUSD')
-                .maybe_single()
-                .execute()
-            )
-            tusd_id = tusd.data.get('id') if tusd.data else None
-            supabase.table('chat_rewards').insert({
-                'chat_id': str(chat_id),
-                'chat_title': chat_title or str(chat_id),
-                'reward_token': 'TUSD',
-                'reward_token_id': tusd_id,
-                'reward': 0.0002,
-                'enabled': True,
-            }).execute()
-            print(f"[ensure_chat_exists] created chat_rewards for {chat_id} (TUSD)", flush=True)
-        else:
-            supabase.table('chat_rewards').update(
-                {'chat_title': chat_title}
-            ).eq('chat_id', str(chat_id)).execute()
-    except Exception as e:
-        print(f"ensure_chat_exists error: {e}", flush=True)
-
-
 async def delete_later(bot, chat_id: int, message_id: int, delay: int = REPLY_TTL_SECONDS):
     try:
         await asyncio.sleep(delay)
@@ -102,6 +52,18 @@ async def start_command(update, context):
             supabase.rpc('ensure_user_exists', {'p_telegram_id': user_id}).execute()
         except Exception as e:
             print(f"[start] ensure_user_exists error: {e}", flush=True)
+
+        # 1.1) активируем "отложенного" реферала, если админ заранее сохранил @username
+        try:
+            username = user.username
+            if username:
+                r = supabase.rpc('activate_pending_referral', {
+                    'p_user_id': user_id,
+                    'p_username': username,
+                }).execute()
+                print(f"[start] activate_pending_referral: {r.data}", flush=True)
+        except Exception as e:
+            print(f"[start] activate_pending_referral error: {e}", flush=True)
 
         # 2) если пришёл параметр — это реферальный ID
         if context.args and len(context.args) > 0:
@@ -132,7 +94,13 @@ async def start_command(update, context):
         print(f"[start] fatal: {e}", flush=True)
 
 
+# ==================== ОБРАБОТКА СООБЩЕНИЙ В ГРУППАХ ====================
 async def handle_message(update, context):
+    """
+    Все проверки (min_words, min_chars, cooldown, лимиты, бюджет, дубликаты)
+    выполняются внутри RPC process_chat_message_v2 на стороне Supabase.
+    Здесь только вызываем RPC и показываем уведомление о награде.
+    """
     try:
         msg = update.effective_message
         if not msg or not msg.text:
@@ -144,37 +112,29 @@ async def handle_message(update, context):
         chat_id = msg.chat.id
         chat_title = msg.chat.title
         text = msg.text.strip()
+        username = msg.from_user.username
 
-        ensure_chat_exists(chat_id, chat_title)
-        settings = get_chat_settings(chat_id)
-
-        if not settings.get('enabled', True):
-            return
-        if settings.get('exclude_commands', True) and text.startswith('/'):
-            return
-
-        min_chars = settings.get('min_chars', 0) or 0
-        if min_chars and len(text) < min_chars:
-            return
-
-        min_words = settings.get('min_words', 0) or 0
-        if min_words and len(text.split()) < min_words:
-            return
-
-        if settings.get('exclude_emoji_only', False) and not has_letters(text):
-            return
-
-        result = supabase.rpc('add_chat_reward', {
-            'p_telegram_id': str(user_id),
-            'p_chat_id': str(chat_id)
+        result = supabase.rpc('process_chat_message_v2', {
+            'p_chat_telegram_id': chat_id,
+            'p_telegram_id': user_id,
+            'p_message_id': msg.message_id,
+            'p_text': text,
+            'p_username': username,
+            'p_chat_title': chat_title,
         }).execute()
 
-        if not (result.data and result.data.get('ok')):
+        data = result.data or {}
+
+        # Сообщение не прошло проверки (команда / короткое / эмодзи / кулдаун / лимит / бюджет)
+        if not data.get('eligible'):
             return
 
-        reward = result.data.get('reward', 0)
-        token = result.data.get('token', 'TUSD')
-        notify_every = result.data.get('notify_every_n', 1) or 1
+        reward = data.get('reward', 0)
+        token = data.get('token_symbol', 'TUSD')
+
+        # Уведомляем на каждое валидное сообщение.
+        # Если хочешь реже — увеличь notify_every (например, 5 или 10).
+        notify_every = 1
 
         key = f"{chat_id}:{user_id}"
         current = notify_counters.get(key, 0) + 1
@@ -185,10 +145,14 @@ async def handle_message(update, context):
             asyncio.create_task(delete_later(context.bot, chat_id, sent.message_id))
         else:
             notify_counters[key] = current
+
     except Exception as e:
         print(f"HANDLE ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def extract_chat_username(link):
     if not link:
         return None
@@ -273,6 +237,7 @@ def set_token_balance(telegram_id: int, token_symbol: str, value: float):
     }, on_conflict='telegram_id,token_id').execute()
 
 
+# ==================== FLASK: ПРОВЕРКА ЗАДАНИЙ ====================
 @app.route('/check_task', methods=['POST'])
 def check_task():
     try:
