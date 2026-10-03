@@ -4,6 +4,7 @@ import asyncio
 import threading
 import requests
 from flask import Flask, request, jsonify
+from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
 from supabase import create_client
 
@@ -13,6 +14,13 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 SUPABASE_URL = 'https://jutszxuzjzyfxarceydw.supabase.co'
 SUPABASE_KEY = 'sb_publishable_geRczpRc3faUHRGto2ue7A_eFFiJDwO'
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Webhook URL — если домен Render изменится, поменяй здесь
+WEBHOOK_URL = 'https://telepat-bot.onrender.com/webhook'
+
+# Глобальные ссылки для webhook-режима
+telegram_app = None
+telegram_loop = None
 
 notify_counters = {}
 REPLY_TTL_SECONDS = 10
@@ -99,7 +107,6 @@ async def handle_message(update, context):
     """
     Все проверки (min_words, min_chars, cooldown, лимиты, бюджет, дубликаты)
     выполняются внутри RPC process_chat_message_v2 на стороне Supabase.
-    Здесь только вызываем RPC и показываем уведомление о награде.
     """
     try:
         msg = update.effective_message
@@ -125,15 +132,12 @@ async def handle_message(update, context):
 
         data = result.data or {}
 
-        # Сообщение не прошло проверки (команда / короткое / эмодзи / кулдаун / лимит / бюджет)
         if not data.get('eligible'):
             return
 
         reward = data.get('reward', 0)
         token = data.get('token_symbol', 'TUSD')
 
-        # Уведомляем на каждое валидное сообщение.
-        # Если хочешь реже — увеличь notify_every (например, 5 или 10).
         notify_every = 1
 
         key = f"{chat_id}:{user_id}"
@@ -166,7 +170,6 @@ def extract_chat_username(link):
 
 
 def tg_get_chat_member_status(chat_username, user_id):
-    """Синхронная проверка подписки через Telegram Bot API."""
     try:
         r = requests.get(
             f'https://api.telegram.org/bot{BOT_TOKEN}/getChatMember',
@@ -237,7 +240,26 @@ def set_token_balance(telegram_id: int, token_symbol: str, value: float):
     }, on_conflict='telegram_id,token_id').execute()
 
 
-# ==================== FLASK: ПРОВЕРКА ЗАДАНИЙ ====================
+# ==================== FLASK: WEBHOOK И ЗАДАНИЯ ====================
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Telegram присылает сюда updates."""
+    global telegram_app, telegram_loop
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
+        asyncio.run_coroutine_threadsafe(
+            telegram_app.process_update(update),
+            telegram_loop
+        )
+        return 'ok', 200
+    except Exception as e:
+        print(f"WEBHOOK ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return 'error', 500
+
+
 @app.route('/check_task', methods=['POST'])
 def check_task():
     try:
@@ -328,18 +350,26 @@ def run_flask():
 
 
 async def bot_main():
+    global telegram_app, telegram_loop
     print("BOT INIT START...", flush=True)
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    telegram_loop = asyncio.get_running_loop()
 
-    # /start — обработчик рефералов и приветствия
-    application.add_handler(CommandHandler('start', start_command))
-    # остальные текстовые сообщения (в группах)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+    telegram_app.add_handler(CommandHandler('start', start_command))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
-    print("Bot started...", flush=True)
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+    # Устанавливаем webhook
+    await telegram_app.bot.set_webhook(
+        url=WEBHOOK_URL,
+        drop_pending_updates=True,
+    )
+    print(f"Webhook установлен: {WEBHOOK_URL}", flush=True)
+    print("Bot started (webhook mode)...", flush=True)
+
+    # Держим loop живым, пока работает Flask
     await asyncio.Event().wait()
 
 
@@ -347,7 +377,7 @@ if __name__ == '__main__':
     print("STARTING FLASK THREAD...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
 
-    print("STARTING BOT POLLING...", flush=True)
+    print("STARTING BOT WEBHOOK...", flush=True)
     try:
         asyncio.run(bot_main())
     except Exception as e:
