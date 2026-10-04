@@ -8,12 +8,23 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
 from supabase import create_client
 
+# ==================== КОНФИГ ====================
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 SUPABASE_URL = 'https://jutszxuzjzyfxarceydw.supabase.co'
-SUPABASE_KEY = 'sb_publishable_geRczpRc3faUHRGto2ue7A_eFFiJDwO'
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+
+# Пробрасываем в env, чтобы order_publisher.py их увидел
+if BOT_TOKEN:
+    os.environ.setdefault('BOT_TOKEN', BOT_TOKEN)
+if SUPABASE_KEY:
+    os.environ.setdefault('SUPABASE_KEY', SUPABASE_KEY)
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Публикатор ордеров в канал
+from order_publisher import start_publisher
 
 # Webhook URL — если домен Render изменится, поменяй здесь
 WEBHOOK_URL = 'https://telepat-bot.onrender.com/webhook'
@@ -55,13 +66,11 @@ async def start_command(update, context):
 
         user_id = user.id
 
-        # 1) создаём пользователя если его нет
         try:
             supabase.rpc('ensure_user_exists', {'p_telegram_id': user_id}).execute()
         except Exception as e:
             print(f"[start] ensure_user_exists error: {e}", flush=True)
 
-        # 1.1) активируем "отложенного" реферала, если админ заранее сохранил @username
         try:
             username = user.username
             if username:
@@ -73,7 +82,6 @@ async def start_command(update, context):
         except Exception as e:
             print(f"[start] activate_pending_referral error: {e}", flush=True)
 
-        # 2) если пришёл параметр — это реферальный ID
         if context.args and len(context.args) > 0:
             raw = (context.args[0] or '').strip()
             try:
@@ -91,7 +99,6 @@ async def start_command(update, context):
                 except Exception as e:
                     print(f"[start] set_referrer error: {e}", flush=True)
 
-        # 3) приветствие
         name = user.first_name or 'друг'
         await msg.reply_text(
             f"👑 Привет, {name}!\n\n"
@@ -104,10 +111,6 @@ async def start_command(update, context):
 
 # ==================== ОБРАБОТКА СООБЩЕНИЙ В ГРУППАХ ====================
 async def handle_message(update, context):
-    """
-    Все проверки (min_words, min_chars, cooldown, лимиты, бюджет, дубликаты)
-    выполняются внутри RPC process_chat_message_v2 на стороне Supabase.
-    """
     try:
         msg = update.effective_message
         if not msg or not msg.text:
@@ -243,7 +246,6 @@ def set_token_balance(telegram_id: int, token_symbol: str, value: float):
 # ==================== FLASK: WEBHOOK И ЗАДАНИЯ ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Telegram присылает сюда updates."""
     global telegram_app, telegram_loop
     try:
         data = request.get_json(force=True)
@@ -361,7 +363,6 @@ async def bot_main():
     await telegram_app.initialize()
     await telegram_app.start()
 
-    # Устанавливаем webhook
     await telegram_app.bot.set_webhook(
         url=WEBHOOK_URL,
         drop_pending_updates=True,
@@ -369,11 +370,13 @@ async def bot_main():
     print(f"Webhook установлен: {WEBHOOK_URL}", flush=True)
     print("Bot started (webhook mode)...", flush=True)
 
-    # Держим loop живым, пока работает Flask
     await asyncio.Event().wait()
 
 
 if __name__ == '__main__':
+    print("STARTING PUBLISHER...", flush=True)
+    start_publisher()   # ← ЗАПУСК РАССЫЛКИ P2P-ОРДЕРОВ
+
     print("STARTING FLASK THREAD...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
 
