@@ -59,7 +59,7 @@ def send_to_channel(order):
         f"👑 <b>Создатель:</b> {creator_rank} (ID {creator_id})\n"
     )
 
-    # ✅ ДВЕ КНОПКИ: открыть в приложении ИЛИ обменять сразу в чате
+    # Две кнопки: открыть в приложении ИЛИ обменять сразу в чате
     reply_markup = {
         "inline_keyboard": [[
             {
