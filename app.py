@@ -107,6 +107,10 @@ async def start_command(update, context):
 
 # ==================== /obmen ====================
 async def obmen_command(update, context):
+    """
+    /obmen 100 TG на TUSD — создаёт ордер в p2p_orders.
+    Publisher подхватит его и запостит в канал с двумя кнопками.
+    """
     try:
         msg = update.effective_message
         if not msg or not msg.text:
@@ -205,33 +209,50 @@ async def obmen_command(update, context):
 
 # ==================== КНОПКА «⚡ ОБМЕНЯТЬ СРАЗУ» ====================
 async def take_order_callback(update, context):
+    """
+    Нажатие кнопки 'ОБМЕНЯТЬ СРАЗУ' под постом в канале.
+    Делает обмен напрямую, без открытия Mini App.
+    """
     try:
         query = update.callback_query
         if not query or not query.data:
             return
 
-        print(f"[take] CALLBACK RECEIVED: {query.data}", flush=True)
+        print(f"[take] CALLBACK RECEIVED: {query.data} from user {query.from_user.id}", flush=True)
 
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception as e:
+            print(f"[take] answer error (не критично): {e}", flush=True)
 
         order_id = query.data.replace('take_', '')
         taker = query.from_user
         taker_id = taker.id
         taker_name = taker.first_name or taker.username or 'Участник'
 
+        print(f"[take] calling RPC accept_p2p_order_chat(order={order_id}, taker={taker_id})", flush=True)
+
+        r = None
         try:
             r = supabase.rpc('accept_p2p_order_chat', {
                 'p_order_id': str(order_id),
                 'p_taker_id': str(taker_id),
             }).execute()
+            print(f"[take] RPC RESPONSE: {r.data}", flush=True)
         except Exception as e:
-            print(f"[take] rpc error: {e}", flush=True)
-            await query.answer("❌ Ошибка соединения", show_alert=True)
+            print(f"[take] RPC RAISED: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            try:
+                await query.answer("❌ Ошибка соединения, попробуй позже", show_alert=True)
+            except Exception:
+                pass
             return
 
-        data = r.data or {}
+        data = (r.data if r else None) or {}
         if not data.get('ok'):
             err = data.get('error', 'unknown')
+            print(f"[take] RPC returned not ok: {err}", flush=True)
             msgs = {
                 'not_found':            '❌ Ордер не найден',
                 'already_taken':        '❌ Ордер уже принят кем-то',
@@ -240,7 +261,10 @@ async def take_order_callback(update, context):
                 'taker_insufficient':   f"❌ У вас недостаточно {data.get('need_token','')}. Нужно: {data.get('need',0)}",
                 'banned':               '❌ Один из пользователей заблокирован',
             }
-            await query.answer(msgs.get(err, f"❌ Ошибка: {err}"), show_alert=True)
+            try:
+                await query.answer(msgs.get(err, f"❌ Ошибка: {err}"), show_alert=True)
+            except Exception:
+                pass
             return
 
         from_amt = float(data['from_amount'])
@@ -248,6 +272,8 @@ async def take_order_callback(update, context):
         from_tok = data['from_token']
         to_tok   = data['to_token']
         creator_name = data.get('creator_name') or 'Продавец'
+
+        print(f"[take] SUCCESS: {from_amt} {from_tok} <-> {to_amt} {to_tok}", flush=True)
 
         new_text = (
             f"✅ <b>СДЕЛКА СОВЕРШЕНА</b>\n\n"
@@ -258,8 +284,9 @@ async def take_order_callback(update, context):
 
         try:
             await query.edit_message_text(text=new_text, parse_mode='HTML')
+            print(f"[take] message edited successfully", flush=True)
         except Exception as e:
-            print(f"[take] edit_message error: {e}", flush=True)
+            print(f"[take] edit_message error: {type(e).__name__}: {e}", flush=True)
 
         creator_id = data.get('creator_id')
         for uid, txt in [
@@ -269,11 +296,12 @@ async def take_order_callback(update, context):
             if uid:
                 try:
                     await context.bot.send_message(chat_id=int(uid), text=txt)
+                    print(f"[take] notified user {uid}", flush=True)
                 except Exception as e:
-                    print(f"[take] notify {uid}: {e}", flush=True)
+                    print(f"[take] notify {uid} error: {type(e).__name__}: {e}", flush=True)
 
     except Exception as e:
-        print(f"[take] FATAL: {e}", flush=True)
+        print(f"[take] FATAL: {type(e).__name__}: {e}", flush=True)
         import traceback
         traceback.print_exc()
 
