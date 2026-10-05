@@ -54,7 +54,7 @@ async def delete_later(bot, chat_id: int, message_id: int, delay: int = REPLY_TT
         print(f"delete_later error: {e}", flush=True)
 
 
-# ==================== /start — ПРИВЯЗКА РЕФЕРАЛА ====================
+# ==================== /start ====================
 async def start_command(update, context):
     try:
         msg = update.effective_message
@@ -105,12 +105,8 @@ async def start_command(update, context):
         print(f"[start] fatal: {e}", flush=True)
 
 
-# ==================== /obmen — СОЗДАТЬ ОРДЕР ИЗ ЧАТА ====================
+# ==================== /obmen ====================
 async def obmen_command(update, context):
-    """
-    /obmen 100 TG на TUSD — создаёт ордер в p2p_orders.
-    Publisher подхватит его и запостит в канал с двумя кнопками.
-    """
     try:
         msg = update.effective_message
         if not msg or not msg.text:
@@ -209,13 +205,12 @@ async def obmen_command(update, context):
 
 # ==================== КНОПКА «⚡ ОБМЕНЯТЬ СРАЗУ» ====================
 async def take_order_callback(update, context):
-    """
-    Нажатие кнопки 'ОБМЕНЯТЬ СРАЗУ' под постом в канале.
-    """
     try:
         query = update.callback_query
         if not query or not query.data:
             return
+
+        print(f"[take] CALLBACK RECEIVED: {query.data}", flush=True)
 
         await query.answer()
 
@@ -227,7 +222,7 @@ async def take_order_callback(update, context):
         try:
             r = supabase.rpc('accept_p2p_order_chat', {
                 'p_order_id': str(order_id),
-                'p_taker_id': taker_id,
+                'p_taker_id': str(taker_id),
             }).execute()
         except Exception as e:
             print(f"[take] rpc error: {e}", flush=True)
@@ -283,7 +278,7 @@ async def take_order_callback(update, context):
         traceback.print_exc()
 
 
-# ==================== ОБРАБОТКА СООБЩЕНИЙ В ГРУППАХ ====================
+# ==================== СООБЩЕНИЯ В ГРУППАХ ====================
 async def handle_message(update, context):
     try:
         msg = update.effective_message
@@ -333,7 +328,7 @@ async def handle_message(update, context):
         traceback.print_exc()
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 def extract_chat_username(link):
     if not link:
         return None
