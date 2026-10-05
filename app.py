@@ -5,7 +5,10 @@ import threading
 import requests
 from flask import Flask, request, jsonify
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
+from telegram.ext import (
+    ApplicationBuilder, MessageHandler, CommandHandler,
+    CallbackQueryHandler, filters
+)
 from supabase import create_client
 
 # ==================== КОНФИГ ====================
@@ -15,7 +18,6 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 SUPABASE_URL = 'https://jutszxuzjzyfxarceydw.supabase.co'
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
-# Пробрасываем в env, чтобы order_publisher.py их увидел
 if BOT_TOKEN:
     os.environ.setdefault('BOT_TOKEN', BOT_TOKEN)
 if SUPABASE_KEY:
@@ -23,13 +25,10 @@ if SUPABASE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Публикатор ордеров в канал
 from order_publisher import start_publisher
 
-# Webhook URL — если домен Render изменится, поменяй здесь
 WEBHOOK_URL = 'https://telepat-bot.onrender.com/webhook'
 
-# Глобальные ссылки для webhook-режима
 telegram_app = None
 telegram_loop = None
 
@@ -57,13 +56,11 @@ async def delete_later(bot, chat_id: int, message_id: int, delay: int = REPLY_TT
 
 # ==================== /start — ПРИВЯЗКА РЕФЕРАЛА ====================
 async def start_command(update, context):
-    """Обработчик /start <referrer_id> — привязка реферала навсегда."""
     try:
         msg = update.effective_message
         user = msg.from_user
         if not user:
             return
-
         user_id = user.id
 
         try:
@@ -88,7 +85,6 @@ async def start_command(update, context):
                 referrer_id = int(raw)
             except (ValueError, TypeError):
                 referrer_id = None
-
             if referrer_id and referrer_id != user_id:
                 try:
                     r = supabase.rpc('set_referrer', {
@@ -107,6 +103,195 @@ async def start_command(update, context):
         )
     except Exception as e:
         print(f"[start] fatal: {e}", flush=True)
+
+
+# ==================== /obmen — СОЗДАТЬ ОРДЕР ИЗ ЧАТА ====================
+async def obmen_command(update, context):
+    """
+    /obmen 100 TG на TUSD — создаёт ордер в p2p_orders.
+    Publisher подхватит его и запостит в канал с двумя кнопками.
+    """
+    try:
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+        user = msg.from_user
+
+        parts = msg.text.strip().split()
+        if len(parts) != 5 or parts[3].lower() not in ('на', 'to'):
+            await msg.reply_text(
+                "❌ Формат: <code>/obmen 100 TG на TUSD</code>",
+                parse_mode='HTML'
+            )
+            return
+
+        try:
+            amount = float(parts[1].replace(',', '.'))
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await msg.reply_text(
+                "❌ Не понял сумму. Пример: <code>/obmen 100 TG на TUSD</code>",
+                parse_mode='HTML'
+            )
+            return
+
+        from_token = parts[2].upper()
+        to_token = parts[4].upper()
+
+        if from_token == to_token:
+            await msg.reply_text("❌ Токены должны быть разными")
+            return
+
+        try:
+            supabase.rpc('ensure_user_exists', {'p_telegram_id': user.id}).execute()
+        except Exception as e:
+            print(f"[obmen] ensure_user_exists: {e}", flush=True)
+
+        try:
+            bal = get_token_balance(user.id, from_token)
+            if bal < amount:
+                await msg.reply_text(
+                    f"❌ У тебя только <b>{bal:g} {from_token}</b>, а нужно <b>{amount:g}</b>",
+                    parse_mode='HTML'
+                )
+                return
+        except Exception as e:
+            print(f"[obmen] balance check: {e}", flush=True)
+
+        try:
+            row_from = supabase.table('telepat_tokens').select('price_tusd').eq('symbol', from_token).maybe_single().execute()
+            row_to = supabase.table('telepat_tokens').select('price_tusd').eq('symbol', to_token).maybe_single().execute()
+            if not (row_from.data and row_to.data):
+                await msg.reply_text(f"❌ Токен {from_token} или {to_token} не найден")
+                return
+            rate = float(row_from.data['price_tusd']) / float(row_to.data['price_tusd'])
+        except Exception as e:
+            print(f"[obmen] rate error: {e}", flush=True)
+            await msg.reply_text("❌ Ошибка курса, попробуй позже")
+            return
+
+        to_amount = amount * rate
+
+        try:
+            urow = supabase.table('users').select('rank_level,rank_name').eq('telegram_id', user.id).maybe_single().execute()
+            rl = (urow.data or {}).get('rank_level') or 1
+            rn = (urow.data or {}).get('rank_name') or 'Житель'
+        except Exception:
+            rl, rn = 1, 'Житель'
+
+        try:
+            result = supabase.table('p2p_orders').insert({
+                'creator_id': user.id,
+                'creator_username': user.username,
+                'creator_rank_level': rl,
+                'creator_rank_name': rn,
+                'from_token': from_token,
+                'to_token': to_token,
+                'from_amount': amount,
+                'to_amount': to_amount,
+                'rate': rate,
+                'status': 'open',
+            }).execute()
+            order_id = result.data[0]['id']
+            print(f"[obmen] created order {order_id} by {user.id}", flush=True)
+        except Exception as e:
+            print(f"[obmen] insert error: {e}", flush=True)
+            await msg.reply_text(f"❌ Не удалось создать ордер: {e}")
+            return
+
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        sent = await context.bot.send_message(
+            chat_id=msg.chat.id,
+            text=f"✅ Ордер создан. Скоро появится в канале с кнопкой обмена."
+        )
+        asyncio.create_task(delete_later(context.bot, msg.chat.id, sent.message_id, 5))
+
+    except Exception as e:
+        print(f"[obmen] FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+
+# ==================== КНОПКА «⚡ ОБМЕНЯТЬ СРАЗУ» ====================
+async def take_order_callback(update, context):
+    """
+    Нажатие кнопки 'ОБМЕНЯТЬ СРАЗУ' под постом в канале.
+    Делает обмен напрямую, без открытия Mini App.
+    """
+    try:
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        await query.answer()
+
+        order_id = query.data.replace('take_', '')
+        taker = query.from_user
+        taker_id = taker.id
+        taker_name = taker.first_name or taker.username or 'Участник'
+
+        try:
+            r = supabase.rpc('accept_p2p_order_chat', {
+                'p_order_id': str(order_id),
+                'p_taker_id': taker_id,
+            }).execute()
+        except Exception as e:
+            print(f"[take] rpc error: {e}", flush=True)
+            await query.answer("❌ Ошибка соединения", show_alert=True)
+            return
+
+        data = r.data or {}
+        if not data.get('ok'):
+            err = data.get('error', 'unknown')
+            msgs = {
+                'not_found':            '❌ Ордер не найден',
+                'already_taken':        '❌ Ордер уже принят кем-то',
+                'own_order':            '❌ Нельзя принять свой ордер',
+                'creator_insufficient': '❌ У продавца недостаточно токенов',
+                'taker_insufficient':   f"❌ У вас недостаточно {data.get('need_token','')}. Нужно: {data.get('need',0)}",
+                'banned':               '❌ Один из пользователей заблокирован',
+            }
+            await query.answer(msgs.get(err, f"❌ Ошибка: {err}"), show_alert=True)
+            return
+
+        from_amt = float(data['from_amount'])
+        to_amt   = float(data['to_amount'])
+        from_tok = data['from_token']
+        to_tok   = data['to_token']
+        creator_name = data.get('creator_name') or 'Продавец'
+
+        new_text = (
+            f"✅ <b>СДЕЛКА СОВЕРШЕНА</b>\n\n"
+            f"👤 <b>{creator_name}</b> → <b>{taker_name}</b>\n"
+            f"💱 {from_amt:g} {from_tok} ⇄ {to_amt:g} {to_tok}\n"
+            f"⏱ {data.get('now_time','')}"
+        )
+
+        try:
+            await query.edit_message_text(text=new_text, parse_mode='HTML')
+        except Exception as e:
+            print(f"[take] edit_message error: {e}", flush=True)
+
+        creator_id = data.get('creator_id')
+        for uid, txt in [
+            (creator_id, f"✅ Твой ордер принят!\n+{to_amt:g} {to_tok} зачислено на кошелёк"),
+            (taker_id,  f"✅ Обмен выполнен!\n+{from_amt:g} {from_tok} зачислено на кошелёк"),
+        ]:
+            if uid:
+                try:
+                    await context.bot.send_message(chat_id=int(uid), text=txt)
+                except Exception as e:
+                    print(f"[take] notify {uid}: {e}", flush=True)
+
+    except Exception as e:
+        print(f"[take] FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 
 # ==================== ОБРАБОТКА СООБЩЕНИЙ В ГРУППАХ ====================
@@ -243,7 +428,7 @@ def set_token_balance(telegram_id: int, token_symbol: str, value: float):
     }, on_conflict='telegram_id,token_id').execute()
 
 
-# ==================== FLASK: WEBHOOK И ЗАДАНИЯ ====================
+# ==================== FLASK ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global telegram_app, telegram_loop
@@ -358,6 +543,8 @@ async def bot_main():
 
     telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler('start', start_command))
+    telegram_app.add_handler(CommandHandler('obmen', obmen_command))                      # ← НОВОЕ
+    telegram_app.add_handler(CallbackQueryHandler(take_order_callback, pattern=r'^take_'))  # ← НОВОЕ
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     await telegram_app.initialize()
@@ -375,7 +562,7 @@ async def bot_main():
 
 if __name__ == '__main__':
     print("STARTING PUBLISHER...", flush=True)
-    start_publisher()   # ← ЗАПУСК РАССЫЛКИ P2P-ОРДЕРОВ
+    start_publisher()
 
     print("STARTING FLASK THREAD...", flush=True)
     threading.Thread(target=run_flask, daemon=True).start()
