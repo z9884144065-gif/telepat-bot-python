@@ -174,18 +174,8 @@ async def obmen_command(update, context):
         to_amount = amount * rate
 
         try:
-            urow = supabase.table('users').select('rank_level,rank_name').eq('telegram_id', user.id).maybe_single().execute()
-            rl = (urow.data or {}).get('rank_level') or 1
-            rn = (urow.data or {}).get('rank_name') or 'Житель'
-        except Exception:
-            rl, rn = 1, 'Житель'
-
-        try:
             result = supabase.table('p2p_orders').insert({
                 'creator_id': user.id,
-                'creator_username': user.username,
-                'creator_rank_level': rl,
-                'creator_rank_name': rn,
                 'from_token': from_token,
                 'to_token': to_token,
                 'from_amount': amount,
@@ -221,7 +211,6 @@ async def obmen_command(update, context):
 async def take_order_callback(update, context):
     """
     Нажатие кнопки 'ОБМЕНЯТЬ СРАЗУ' под постом в канале.
-    Делает обмен напрямую, без открытия Mini App.
     """
     try:
         query = update.callback_query
@@ -543,8 +532,8 @@ async def bot_main():
 
     telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler('start', start_command))
-    telegram_app.add_handler(CommandHandler('obmen', obmen_command))                      # ← НОВОЕ
-    telegram_app.add_handler(CallbackQueryHandler(take_order_callback, pattern=r'^take_'))  # ← НОВОЕ
+    telegram_app.add_handler(CommandHandler('obmen', obmen_command))
+    telegram_app.add_handler(CallbackQueryHandler(take_order_callback, pattern=r'^take_'))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     await telegram_app.initialize()
