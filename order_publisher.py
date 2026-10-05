@@ -59,11 +59,16 @@ def send_to_channel(order):
         f"👑 <b>Создатель:</b> {creator_rank} (ID {creator_id})\n"
     )
 
+    # ✅ ДВЕ КНОПКИ: открыть в приложении ИЛИ обменять сразу в чате
     reply_markup = {
         "inline_keyboard": [[
             {
-                "text": "🛒 КУПИТЬ СЕЙЧАС",
+                "text": "🛒 ОТКРЫТЬ",
                 "url": f"https://t.me/TELEPATp2p_bot?startapp=order_{order_id}"
+            },
+            {
+                "text": "⚡ ОБМЕНЯТЬ СРАЗУ",
+                "callback_data": f"take_{order_id}"
             }
         ]]
     }
@@ -96,7 +101,6 @@ def send_to_channel(order):
                 time.sleep(retry_after + 1)
                 continue
 
-            # Постоянные ошибки — не повторяем
             print(f"[PUBLISHER] ❌ {r.status_code}: {r.text[:300]}", flush=True)
             if r.status_code == 400 and "chat not found" in r.text.lower():
                 print("[PUBLISHER] Проверь, что бот добавлен в канал как админ", flush=True)
@@ -121,9 +125,6 @@ def poll_new_orders():
         print(f"[PUBLISHER] ❌ supabase клиент: {e}", flush=True)
         return
 
-    # Стартуем с текущего момента — старые ордера не постим.
-    # Хочешь залить все старые open-ордера — замени на:
-    # last_created = '1970-01-01T00:00:00+00:00'
     last_created = datetime.now(timezone.utc).isoformat()
     print(f"[PUBLISHER] Старт. Слежу за ордерами после {last_created}", flush=True)
 
