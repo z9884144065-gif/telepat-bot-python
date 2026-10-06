@@ -352,7 +352,6 @@ async def rain_command(update, context):
         chat_id = msg.chat.id
         sender = msg.from_user
 
-        # Показываем "печатает"
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action='typing')
         except Exception:
@@ -595,6 +594,19 @@ async def handle_message(update, context):
         chat_title = msg.chat.title
         text = msg.text.strip()
         username = msg.from_user.username
+        first_name = msg.from_user.first_name or ''
+        last_name  = msg.from_user.last_name or ''
+        full_name  = (first_name + ' ' + last_name).strip() or None
+
+        # Синхронизируем имя в users, чтобы в топе не было «anon»
+        try:
+            supabase.rpc('ensure_user_exists', {
+                'p_telegram_id': user_id,
+                'p_first_name': full_name,
+                'p_username': username,
+            }).execute()
+        except Exception as e:
+            print(f"[handle_message] ensure_user_exists error: {e}", flush=True)
 
         result = supabase.rpc('process_chat_message_v2', {
             'p_chat_telegram_id': chat_id,
