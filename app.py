@@ -335,6 +335,7 @@ async def top_command(update, context):
         chat_id = msg.chat.id
         r = supabase.rpc('get_chat_leaderboard_v2', {
             'p_chat_telegram_id': chat_id,
+            'p_limit': 10,
         }).execute()
         rows = r.data or []
         if not rows:
@@ -343,15 +344,18 @@ async def top_command(update, context):
 
         lines = ["🏆 <b>ТОП-10 ЧАТА ЗА СЕГОДНЯ</b>\n"]
         medals = ['🥇', '🥈', '🥉']
-        for i, row in enumerate(rows[:10], 1):
-            place = medals[i-1] if i <= 3 else f"{i}."
-            name = row.get('first_name') or row.get('username') or '—'
-            cnt = row.get('msg_count') or row.get('count') or row.get('messages') or 0
+        for row in rows:
+            place_num = int(row.get('rank_position') or 0)
+            place = medals[place_num - 1] if 1 <= place_num <= 3 else f"{place_num}."
+            name = row.get('username') or '—'
+            cnt = row.get('message_count') or 0
             lines.append(f"{place} <b>{name}</b> — {cnt} сообщ.")
         await msg.reply_text("\n".join(lines), parse_mode='HTML')
     except Exception as e:
         print(f"[top] error: {e}", flush=True)
-        await msg.reply_text("❌ Ошибка топа")
+        import traceback
+        traceback.print_exc()
+        await msg.reply_text(f"❌ Ошибка топа: {e}")
 
 
 # ==================== /balance ====================
