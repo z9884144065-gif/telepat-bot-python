@@ -312,6 +312,109 @@ async def pay_command(update, context):
         traceback.print_exc()
 
 
+# ==================== /rain (/flashpay, /flash) ====================
+async def rain_command(update, context):
+    """Раздаёт токены всем активным в чате за последние 30 минут.
+
+    Использование:
+      /rain 100 AI
+      /flashpay 1 TG
+      /flash 0.5 TUSD
+    """
+    try:
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+
+        if msg.chat.type not in ('group', 'supergroup'):
+            await msg.reply_text("❌ Только в чате")
+            return
+
+        parts = msg.text.strip().split()
+        if len(parts) != 3:
+            await msg.reply_text(
+                "❌ Формат: <code>/rain 100 AI</code>\n"
+                "Раздаёт всем, кто писал в чате за последние 30 минут.",
+                parse_mode='HTML'
+            )
+            return
+
+        try:
+            total = float(parts[1].replace(',', '.'))
+        except (ValueError, TypeError):
+            await msg.reply_text("❌ Не понял сумму")
+            return
+        if total <= 0:
+            await msg.reply_text("❌ Сумма должна быть больше 0")
+            return
+
+        token = parts[2].upper()
+        chat_id = msg.chat.id
+        sender = msg.from_user
+
+        # Показываем "печатает"
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        except Exception:
+            pass
+
+        r = supabase.rpc('chat_rain', {
+            'p_chat_telegram_id': chat_id,
+            'p_from_id': sender.id,
+            'p_token': token,
+            'p_total_amount': total,
+            'p_window_minutes': 30,
+            'p_min_per_user': 0.0001,
+        }).execute()
+
+        data = r.data or {}
+        if not data.get('ok'):
+            err = data.get('error', 'unknown')
+            if err == 'no_recipients':
+                await msg.reply_text("🤷 В чате никого активного за последние 30 минут")
+            elif err == 'insufficient':
+                await msg.reply_text(
+                    f"❌ Недостаточно {token}.\n"
+                    f"У тебя: <b>{data.get('have',0):g}</b>\n"
+                    f"Нужно: <b>{data.get('need',0):g}</b>",
+                    parse_mode='HTML'
+                )
+            elif err == 'too_small':
+                per = data.get('per_user', 0)
+                mn = data.get('min_per_user', 0)
+                cnt = data.get('recipients', 0)
+                await msg.reply_text(
+                    f"❌ Слишком мало на человека.\n"
+                    f"👥 Активных: <b>{cnt}</b>\n"
+                    f"💰 По <b>{per:g}</b> {token} — меньше минимума {mn:g}.\n"
+                    f"💡 Увеличь сумму или подожди.",
+                    parse_mode='HTML'
+                )
+            elif err == 'chat_not_active':
+                await msg.reply_text("❌ Чат не зарегистрирован в боте")
+            else:
+                await msg.reply_text(f"❌ Ошибка: {err}")
+            return
+
+        await msg.reply_text(
+            f"🌧 <b>ДОЖДЬ РАЗДАЧИ!</b>\n\n"
+            f"💵 Роздано: <b>{data.get('total_sent', 0):g} {token}</b>\n"
+            f"👥 Получателей: <b>{data.get('sent', 0)}</b>\n"
+            f"💰 Каждому: <b>~{data.get('per_user', 0):g} {token}</b>\n"
+            f"👑 От: {sender.first_name or 'щедрый друг'}",
+            parse_mode='HTML'
+        )
+
+    except Exception as e:
+        print(f"[rain] FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        try:
+            await update.effective_message.reply_text(f"❌ Ошибка: {e}")
+        except Exception:
+            pass
+
+
 # ==================== /help ====================
 async def help_command(update, context):
     text = (
@@ -320,6 +423,7 @@ async def help_command(update, context):
         "🔄 /obmen 100 TG на TUSD — создать P2P-ордер\n"
         "💸 /pay 100 AI — перевести (ответом на сообщение)\n"
         "💸 /pay @user 100 AI — перевести по @username\n"
+        "🌧 /rain 100 AI — дождь (раздать всем активным)\n"
         "🏆 /top — топ-10 чата за сегодня\n"
         "💰 /balance — мой баланс\n"
         "❓ /help — эта справка\n\n"
@@ -725,12 +829,15 @@ async def bot_main():
     telegram_loop = asyncio.get_running_loop()
 
     telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler('start',   start_command))
-    telegram_app.add_handler(CommandHandler('obmen',   obmen_command))
-    telegram_app.add_handler(CommandHandler('pay',     pay_command))
-    telegram_app.add_handler(CommandHandler('help',    help_command))
-    telegram_app.add_handler(CommandHandler('top',     top_command))
-    telegram_app.add_handler(CommandHandler('balance', balance_command))
+    telegram_app.add_handler(CommandHandler('start',    start_command))
+    telegram_app.add_handler(CommandHandler('obmen',    obmen_command))
+    telegram_app.add_handler(CommandHandler('pay',      pay_command))
+    telegram_app.add_handler(CommandHandler('help',     help_command))
+    telegram_app.add_handler(CommandHandler('top',      top_command))
+    telegram_app.add_handler(CommandHandler('balance',  balance_command))
+    telegram_app.add_handler(CommandHandler('rain',     rain_command))
+    telegram_app.add_handler(CommandHandler('flashpay', rain_command))
+    telegram_app.add_handler(CommandHandler('flash',    rain_command))
     telegram_app.add_handler(CallbackQueryHandler(take_order_callback, pattern=r'^take_'))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
