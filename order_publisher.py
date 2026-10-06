@@ -17,6 +17,7 @@ from supabase import create_client
 CHANNEL_ID = -1001960985208   # канал tgbanks
 POLL_INTERVAL = 10            # проверять новые ордера каждые 10 сек
 ONLY_STATUS = 'open'          # постим только живые ордера
+BOT_USERNAME = os.environ.get('BOT_USERNAME', 'TELEPATp2p_bot')  # username бота для deep-link
 # ============================================
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -59,16 +60,18 @@ def send_to_channel(order):
         f"👑 <b>Создатель:</b> {creator_rank} (ID {creator_id})\n"
     )
 
-    # Две кнопки: открыть в приложении ИЛИ обменять сразу в чате
+    # Две URL-кнопки — Telegram открывает Mini App сам, бот не участвует.
+    # order_<id> → открыть карточку ордера
+    # quick_<id> → открыть карточку + модалку быстрого выкупа
     reply_markup = {
         "inline_keyboard": [[
             {
                 "text": "🛒 ОТКРЫТЬ",
-                "url": f"https://t.me/TELEPATp2p_bot?startapp=order_{order_id}"
+                "url": f"https://t.me/{BOT_USERNAME}?startapp=order_{order_id}"
             },
             {
-                "text": "⚡ ОБМЕНЯТЬ СРАЗУ",
-                "callback_data": f"take_{order_id}"
+                "text": "⚡ БЫСТР.ОБМЕН",
+                "url": f"https://t.me/{BOT_USERNAME}?startapp=quick_{order_id}"
             }
         ]]
     }
