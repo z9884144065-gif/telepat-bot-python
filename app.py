@@ -207,6 +207,173 @@ async def obmen_command(update, context):
         traceback.print_exc()
 
 
+# ==================== /pay ====================
+async def pay_command(update, context):
+    """Перевод в ответ на сообщение или по @username.
+       /pay 100 AI  (в ответ на сообщение)
+       /pay @user 100 AI
+    """
+    try:
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+        sender = msg.from_user
+        parts = msg.text.strip().split()
+        args = parts[1:]
+
+        to_id = None
+        if msg.reply_to_message and msg.reply_to_message.from_user:
+            to_id = msg.reply_to_message.from_user.id
+            to_name = msg.reply_to_message.from_user.first_name or 'получатель'
+        elif args and args[0].startswith('@'):
+            username = args[0][1:]
+            r = supabase.table('users').select('telegram_id, first_name').ilike('username', username).limit(1).execute()
+            if not r.data:
+                await msg.reply_text(f"❌ @{username} не найден в базе")
+                return
+            to_id = int(r.data[0]['telegram_id'])
+            to_name = r.data[0].get('first_name') or f'@{username}'
+            args = args[1:]
+        else:
+            await msg.reply_text(
+                "❌ Формат:\n"
+                "• Ответь на сообщение и напиши <code>/pay 100 AI</code>\n"
+                "• Или <code>/pay @username 100 AI</code>",
+                parse_mode='HTML'
+            )
+            return
+
+        if not args or len(args) < 2:
+            await msg.reply_text("❌ Укажи сумму и токен: <code>/pay 100 AI</code>", parse_mode='HTML')
+            return
+
+        try:
+            amount = float(args[0].replace(',', '.'))
+        except (ValueError, TypeError):
+            await msg.reply_text("❌ Не понял сумму")
+            return
+        if amount <= 0:
+            await msg.reply_text("❌ Сумма должна быть больше 0")
+            return
+
+        token = args[1].upper()
+
+        if to_id == sender.id:
+            await msg.reply_text("❌ Нельзя перевести самому себе")
+            return
+
+        r = supabase.rpc('user_transfer', {
+            'p_from_id': sender.id,
+            'p_to_id': to_id,
+            'p_token': token,
+            'p_amount': amount,
+        }).execute()
+
+        data = r.data or {}
+        if not data.get('ok'):
+            err = data.get('error', 'unknown')
+            msgs = {
+                'insufficient':     f"❌ Недостаточно средств. У тебя {data.get('have',0):g} {token}",
+                'self_transfer':    "❌ Нельзя себе",
+                'invalid_amount':   "❌ Некорректная сумма",
+                'from_banned':      "❌ Ты заблокирован",
+                'to_banned':        "❌ Получатель заблокирован",
+                'from_not_found':   "❌ Твой аккаунт не найден, открой /start",
+                'to_not_found':     "❌ Получатель не найден в базе",
+                'token_not_found':  f"❌ Токен {token} не найден",
+            }
+            await msg.reply_text(msgs.get(err, f"❌ Ошибка: {err}"))
+            return
+
+        await msg.reply_text(
+            f"✅ Перевод выполнен\n\n"
+            f"👤 Кому: <b>{to_name}</b>\n"
+            f"💵 Сумма: <b>{amount:g} {token}</b>\n"
+            f"💰 Твой остаток: <b>{data.get('from_new_balance',0):g} {token}</b>",
+            parse_mode='HTML'
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=to_id,
+                text=(
+                    f"💸 <b>Вам перевод!</b>\n\n"
+                    f"👤 От: {sender.first_name or 'пользователь'}\n"
+                    f"💵 Сумма: <b>{amount:g} {token}</b>"
+                ),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            print(f"[pay] notify error: {e}", flush=True)
+
+    except Exception as e:
+        print(f"[pay] FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+
+# ==================== /help ====================
+async def help_command(update, context):
+    text = (
+        "🤖 <b>КОМАНДЫ БОТА</b>\n\n"
+        "🚀 /start — регистрация\n"
+        "🔄 /obmen 100 TG на TUSD — создать P2P-ордер\n"
+        "💸 /pay 100 AI — перевести (ответом на сообщение)\n"
+        "💸 /pay @user 100 AI — перевести по @username\n"
+        "🏆 /top — топ-10 чата за сегодня\n"
+        "💰 /balance — мой баланс\n"
+        "❓ /help — эта справка\n\n"
+        "📱 Полный функционал — в приложении"
+    )
+    await update.effective_message.reply_text(text, parse_mode='HTML')
+
+
+# ==================== /top ====================
+async def top_command(update, context):
+    try:
+        msg = update.effective_message
+        chat_id = msg.chat.id
+        r = supabase.rpc('get_chat_leaderboard_v2', {
+            'p_chat_telegram_id': chat_id,
+        }).execute()
+        rows = r.data or []
+        if not rows:
+            await msg.reply_text("Пока никто не писал сегодня 🤷")
+            return
+
+        lines = ["🏆 <b>ТОП-10 ЧАТА ЗА СЕГОДНЯ</b>\n"]
+        medals = ['🥇', '🥈', '🥉']
+        for i, row in enumerate(rows[:10], 1):
+            place = medals[i-1] if i <= 3 else f"{i}."
+            name = row.get('first_name') or row.get('username') or '—'
+            cnt = row.get('msg_count') or row.get('count') or row.get('messages') or 0
+            lines.append(f"{place} <b>{name}</b> — {cnt} сообщ.")
+        await msg.reply_text("\n".join(lines), parse_mode='HTML')
+    except Exception as e:
+        print(f"[top] error: {e}", flush=True)
+        await msg.reply_text("❌ Ошибка топа")
+
+
+# ==================== /balance ====================
+async def balance_command(update, context):
+    try:
+        msg = update.effective_message
+        user_id = msg.from_user.id
+        r = supabase.table('users').select('tg_balance,ai_balance,tusd_balance,rank_name,rank_level').eq('telegram_id', user_id).maybe_single().execute()
+        u = r.data or {}
+        text = (
+            f"💰 <b>ТВОЙ БАЛАНС</b>\n\n"
+            f"🥇 TG: <b>{float(u.get('tg_balance') or 0):g}</b>\n"
+            f"🤖 AI: <b>{float(u.get('ai_balance') or 0):g}</b>\n"
+            f"💵 TUSD: <b>{float(u.get('tusd_balance') or 0):g}</b>\n\n"
+            f"👑 Титул: <b>{u.get('rank_name') or '—'}</b> (ур. {u.get('rank_level') or 1})"
+        )
+        await msg.reply_text(text, parse_mode='HTML')
+    except Exception as e:
+        print(f"[balance] error: {e}", flush=True)
+        await msg.reply_text("❌ Ошибка, попробуй позже")
+
+
 # ==================== КНОПКА «⚡ ОБМЕНЯТЬ СРАЗУ» ====================
 async def take_order_callback(update, context):
     """
@@ -554,8 +721,12 @@ async def bot_main():
     telegram_loop = asyncio.get_running_loop()
 
     telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler('start', start_command))
-    telegram_app.add_handler(CommandHandler('obmen', obmen_command))
+    telegram_app.add_handler(CommandHandler('start',   start_command))
+    telegram_app.add_handler(CommandHandler('obmen',   obmen_command))
+    telegram_app.add_handler(CommandHandler('pay',     pay_command))
+    telegram_app.add_handler(CommandHandler('help',    help_command))
+    telegram_app.add_handler(CommandHandler('top',     top_command))
+    telegram_app.add_handler(CommandHandler('balance', balance_command))
     telegram_app.add_handler(CallbackQueryHandler(take_order_callback, pattern=r'^take_'))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
