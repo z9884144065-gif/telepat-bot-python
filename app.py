@@ -630,7 +630,11 @@ async def handle_message(update, context):
 
             try:
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🚀 ОТКРЫТЬ TELEPAT", url=f"https://t.me/{BOT_USERNAME_APP}")]
+                    [InlineKeyboardButton(
+                        "🚀 ОТКРЫТЬ TELEPAT",
+                        url=f"https://t.me/{BOT_USERNAME_APP}",
+                        style="primary"
+                    )]
                 ])
             except Exception:
                 kb = None
