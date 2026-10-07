@@ -72,13 +72,15 @@ def send_to_channel(order):
             [
                 {
                     "text": "🛒 ОТКРЫТЬ ОРДЕР",
-                    "url": f"https://t.me/{BOT_USERNAME}?startapp=order_{order_id}"
+                    "url": f"https://t.me/{BOT_USERNAME}?startapp=order_{order_id}",
+                    "style": "primary"
                 }
             ],
             [
                 {
                     "text": "⚡ БЫСТРЫЙ ВЫКУП",
-                    "url": f"https://t.me/{BOT_USERNAME}?startapp=quick_{order_id}"
+                    "url": f"https://t.me/{BOT_USERNAME}?startapp=quick_{order_id}",
+                    "style": "success"
                 }
             ]
         ]
