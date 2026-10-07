@@ -17,7 +17,7 @@ from supabase import create_client
 CHANNEL_ID = -1001960985208   # канал tgbanks
 POLL_INTERVAL = 10            # проверять новые ордера каждые 10 сек
 ONLY_STATUS = 'open'          # постим только живые ордера
-BOT_USERNAME = os.environ.get('BOT_USERNAME', 'TELEPATp2p_bot')  # username бота для deep-link
+BOT_USERNAME = os.environ.get('BOT_USERNAME', 'TELEPATp2p_bot')
 # ============================================
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -46,34 +46,42 @@ def send_to_channel(order):
         to_amount = float(order.get('to_amount') or 0)
         rate = float(order.get('rate') or 0)
         creator_id = esc(order.get('creator_id', '?'))
-        creator_rank = esc(order.get('creator_rank_name') or 'Житель')
+        creator_rank = esc(order.get('creator_rank_name') or 'Новичок')
         order_id = order.get('id')
     except Exception as e:
         print(f"[PUBLISHER] ❌ Ошибка разбора ордера {order.get('id')}: {e}", flush=True)
         return False
 
     text = (
-        f"🆕 <b>НОВЫЙ P2P-ОРДЕР</b>\n\n"
-        f"💰 <b>Продам:</b> {from_amount:g} {from_token}\n"
-        f"💵 <b>Хочу получить:</b> {to_amount:g} {to_token}\n\n"
+        f"┏━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"   🆕 <b>НОВЫЙ P2P-ОРДЕР</b>   \n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"📦 <b>Отдаёт:</b>\n"
+        f"     💰 <b>{from_amount:g}</b> {from_token}\n\n"
+        f"🎯 <b>Хочет получить:</b>\n"
+        f"     💵 <b>{to_amount:g}</b> {to_token}\n\n"
         f"📊 <b>Курс:</b> 1 {from_token} = {rate:g} {to_token}\n"
-        f"👑 <b>Создатель:</b> {creator_rank} (ID {creator_id})\n"
+        f"👑 <b>Продавец:</b> {creator_rank}\n"
+        f"🆔 <b>ID:</b> <code>{creator_id}</code>\n\n"
+        f"┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
+        f"⚡ <i>Нажми кнопку ниже чтобы выкупить</i>"
     )
 
-    # Две URL-кнопки — Telegram открывает Mini App сам, бот не участвует.
-    # order_<id> → открыть карточку ордера
-    # quick_<id> → открыть карточку + модалку быстрого выкупа
     reply_markup = {
-        "inline_keyboard": [[
-            {
-                "text": "🛒 ОТКРЫТЬ",
-                "url": f"https://t.me/{BOT_USERNAME}?startapp=order_{order_id}"
-            },
-            {
-                "text": "⚡ БЫСТР.ОБМЕН",
-                "url": f"https://t.me/{BOT_USERNAME}?startapp=quick_{order_id}"
-            }
-        ]]
+        "inline_keyboard": [
+            [
+                {
+                    "text": "🛒 ОТКРЫТЬ ОРДЕР",
+                    "url": f"https://t.me/{BOT_USERNAME}?startapp=order_{order_id}"
+                }
+            ],
+            [
+                {
+                    "text": "⚡ БЫСТРЫЙ ВЫКУП",
+                    "url": f"https://t.me/{BOT_USERNAME}?startapp=quick_{order_id}"
+                }
+            ]
+        ]
     }
 
     # До 3 попыток: на 429 (rate limit) — ждём и повторяем
