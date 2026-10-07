@@ -4,7 +4,7 @@ import asyncio
 import threading
 import requests
 from flask import Flask, request, jsonify
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, CommandHandler,
     CallbackQueryHandler, filters
@@ -17,6 +17,7 @@ app = Flask(__name__)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 SUPABASE_URL = 'https://jutszxuzjzyfxarceydw.supabase.co'
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+BOT_USERNAME_APP = os.environ.get('BOT_USERNAME', 'TELEPATp2p_bot')
 
 if BOT_TOKEN:
     os.environ.setdefault('BOT_TOKEN', BOT_TOKEN)
@@ -209,10 +210,6 @@ async def obmen_command(update, context):
 
 # ==================== /pay ====================
 async def pay_command(update, context):
-    """Перевод в ответ на сообщение или по @username.
-       /pay 100 AI  (в ответ на сообщение)
-       /pay @user 100 AI
-    """
     try:
         msg = update.effective_message
         if not msg or not msg.text:
@@ -314,13 +311,6 @@ async def pay_command(update, context):
 
 # ==================== /rain (/flashpay, /flash) ====================
 async def rain_command(update, context):
-    """Раздаёт токены всем активным в чате за последние 30 минут.
-
-    Использование:
-      /rain 100 AI
-      /flashpay 1 TG
-      /flash 0.5 TUSD
-    """
     try:
         msg = update.effective_message
         if not msg or not msg.text:
@@ -473,7 +463,7 @@ async def balance_command(update, context):
             f"🥇 TG: <b>{float(u.get('tg_balance') or 0):g}</b>\n"
             f"🤖 AI: <b>{float(u.get('ai_balance') or 0):g}</b>\n"
             f"💵 TUSD: <b>{float(u.get('tusd_balance') or 0):g}</b>\n\n"
-            f"👑 Титул: <b>{u.get('rank_name') or '—'}</b> (ур. {u.get('rank_level') or 1})"
+            f"👑 Титул: <b>{u.get('rank_name') or 'Новичок'}</b> (ур. {u.get('rank_level') or 0})"
         )
         await msg.reply_text(text, parse_mode='HTML')
     except Exception as e:
@@ -483,10 +473,6 @@ async def balance_command(update, context):
 
 # ==================== КНОПКА «⚡ ОБМЕНЯТЬ СРАЗУ» ====================
 async def take_order_callback(update, context):
-    """
-    Нажатие кнопки 'ОБМЕНЯТЬ СРАЗУ' под постом в канале.
-    Делает обмен напрямую, без открытия Mini App.
-    """
     try:
         query = update.callback_query
         if not query or not query.data:
@@ -632,7 +618,29 @@ async def handle_message(update, context):
 
         if current >= notify_every:
             notify_counters[key] = 0
-            sent = await msg.reply_text(f"✅ Вам начислено {reward} {token} за активность!")
+
+            # Красивое сообщение с наградой + кнопка на WebApp
+            nice_text = (
+                f"🎁 <b>НАГРАДА ЗА АКТИВНОСТЬ!</b>\n\n"
+                f"👤 <b>{first_name or 'Участник'}</b>\n"
+                f"💰 Получено: <b>+{reward} {token}</b>\n"
+                f"🔥 Продолжай в том же духе!\n\n"
+                f"⚡ <i>Открой приложение чтобы увидеть баланс</i>"
+            )
+
+            try:
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 ОТКРЫТЬ TELEPAT", url=f"https://t.me/{BOT_USERNAME_APP}")]
+                ])
+            except Exception:
+                kb = None
+
+            sent = await msg.reply_text(
+                nice_text,
+                parse_mode='HTML',
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
             asyncio.create_task(delete_later(context.bot, chat_id, sent.message_id))
         else:
             notify_counters[key] = current
