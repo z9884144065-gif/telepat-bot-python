@@ -694,13 +694,22 @@ async def handle_message(update, context):
                 print(f"[reward] balance fetch error: {e}", flush=True)
                 new_balance = 0
 
+            # Сколько сообщений осталось на сегодня
+            today_count = int(data.get('today_count') or 0)
+            daily_limit = int(data.get('limit') or 0)
+            remaining = max(0, daily_limit - today_count) if daily_limit > 0 else 0
+
+            if daily_limit > 0:
+                limit_line = f"\n\n📊 Осталось на сегодня: <b>{remaining}</b> сообщений"
+            else:
+                limit_line = ""
+
             nice_text = (
                 f"🎁 <b>НАГРАДА ЗА АКТИВНОСТЬ!</b>\n\n"
                 f"👤 <b>{first_name or 'Участник'}</b>\n"
                 f"💰 Получено: <b>+{reward} {token}</b>\n"
-                f"💼 Ваш баланс: <b>{new_balance:g} {token}</b>\n"
-                f"🔥 Продолжай в том же духе!\n\n"
-                f"⚡ <i>Открой приложение чтобы увидеть все токены</i>"
+                f"💼 Ваш баланс: <b>{new_balance:g} {token}</b>"
+                f"{limit_line}"
             )
 
             try:
