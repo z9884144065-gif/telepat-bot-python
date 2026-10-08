@@ -106,39 +106,12 @@ async def start_command(update, context):
         print(f"[start] fatal: {e}", flush=True)
 
 
-# ==================== /obmen ====================
-async def obmen_command(update, context):
-    """
-    /obmen 100 TG на TUSD — создаёт ордер в p2p_orders.
-    Publisher подхватит его и запостит в канал с двумя кнопками.
-    """
+# ==================== ОБЩАЯ ЛОГИКА СОЗДАНИЯ ОРДЕРА ====================
+async def _create_order_internal(update, context, amount, from_token, to_token):
+    """Общая логика создания ордера. Вызывается из /order и /obmen."""
     try:
         msg = update.effective_message
-        if not msg or not msg.text:
-            return
         user = msg.from_user
-
-        parts = msg.text.strip().split()
-        if len(parts) != 5 or parts[3].lower() not in ('на', 'to'):
-            await msg.reply_text(
-                "❌ Формат: <code>/obmen 100 TG на TUSD</code>",
-                parse_mode='HTML'
-            )
-            return
-
-        try:
-            amount = float(parts[1].replace(',', '.'))
-            if amount <= 0:
-                raise ValueError
-        except ValueError:
-            await msg.reply_text(
-                "❌ Не понял сумму. Пример: <code>/obmen 100 TG на TUSD</code>",
-                parse_mode='HTML'
-            )
-            return
-
-        from_token = parts[2].upper()
-        to_token = parts[4].upper()
 
         if from_token == to_token:
             await msg.reply_text("❌ Токены должны быть разными")
@@ -147,7 +120,7 @@ async def obmen_command(update, context):
         try:
             supabase.rpc('ensure_user_exists', {'p_telegram_id': user.id}).execute()
         except Exception as e:
-            print(f"[obmen] ensure_user_exists: {e}", flush=True)
+            print(f"[order] ensure_user_exists: {e}", flush=True)
 
         try:
             bal = get_token_balance(user.id, from_token)
@@ -158,7 +131,7 @@ async def obmen_command(update, context):
                 )
                 return
         except Exception as e:
-            print(f"[obmen] balance check: {e}", flush=True)
+            print(f"[order] balance check: {e}", flush=True)
 
         try:
             row_from = supabase.table('telepat_tokens').select('price_tusd').eq('symbol', from_token).maybe_single().execute()
@@ -168,7 +141,7 @@ async def obmen_command(update, context):
                 return
             rate = float(row_from.data['price_tusd']) / float(row_to.data['price_tusd'])
         except Exception as e:
-            print(f"[obmen] rate error: {e}", flush=True)
+            print(f"[order] rate error: {e}", flush=True)
             await msg.reply_text("❌ Ошибка курса, попробуй позже")
             return
 
@@ -185,9 +158,9 @@ async def obmen_command(update, context):
                 'status': 'open',
             }).execute()
             order_id = result.data[0]['id']
-            print(f"[obmen] created order {order_id} by {user.id}", flush=True)
+            print(f"[order] created order {order_id} by {user.id}", flush=True)
         except Exception as e:
-            print(f"[obmen] insert error: {e}", flush=True)
+            print(f"[order] insert error: {e}", flush=True)
             await msg.reply_text(f"❌ Не удалось создать ордер: {e}")
             return
 
@@ -201,6 +174,101 @@ async def obmen_command(update, context):
             text=f"✅ Ордер создан. Скоро появится в канале с кнопкой обмена."
         )
         asyncio.create_task(delete_later(context.bot, msg.chat.id, sent.message_id, 5))
+
+    except Exception as e:
+        print(f"[order] FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+
+# ==================== /order (короткий формат) ====================
+async def order_command(update, context):
+    """
+    /order 100 TG TUSD — короткий формат.
+    /o 100 TG TUSD
+    """
+    try:
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+
+        parts = msg.text.strip().split()
+        if len(parts) != 4:
+            await msg.reply_text(
+                "❌ Формат: <code>/order 100 TG TUSD</code>\n\n"
+                "📌 Примеры:\n"
+                "• <code>/order 100 TG TUSD</code> — продать 100 TG за TUSD\n"
+                "• <code>/order 1 RUB TUSD</code> — продать 1 RUB за TUSD\n"
+                "• <code>/order 0.5 AI TG</code> — продать 0.5 AI за TG",
+                parse_mode='HTML'
+            )
+            return
+
+        try:
+            amount = float(parts[1].replace(',', '.'))
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await msg.reply_text(
+                "❌ Не понял сумму. Пример: <code>/order 100 TG TUSD</code>",
+                parse_mode='HTML'
+            )
+            return
+
+        from_token = parts[2].upper()
+        to_token = parts[3].upper()
+
+        await _create_order_internal(update, context, amount, from_token, to_token)
+
+    except Exception as e:
+        print(f"[order] FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+
+# ==================== /obmen (старый формат) ====================
+async def obmen_command(update, context):
+    """
+    /obmen 100 TG на TUSD — старый формат (5 слов).
+    /obmen 100 TG TUSD — тоже поддерживается (4 слова).
+    """
+    try:
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+
+        parts = msg.text.strip().split()
+
+        if len(parts) == 5 and parts[3].lower() in ('на', 'to'):
+            amount_str = parts[1]
+            from_token = parts[2].upper()
+            to_token = parts[4].upper()
+        elif len(parts) == 4:
+            amount_str = parts[1]
+            from_token = parts[2].upper()
+            to_token = parts[3].upper()
+        else:
+            await msg.reply_text(
+                "❌ Формат:\n"
+                "• <code>/obmen 100 TG на TUSD</code>\n"
+                "• Или <code>/obmen 100 TG TUSD</code>\n"
+                "• Или короче: <code>/order 100 TG TUSD</code>",
+                parse_mode='HTML'
+            )
+            return
+
+        try:
+            amount = float(amount_str.replace(',', '.'))
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await msg.reply_text(
+                "❌ Не понял сумму. Пример: <code>/obmen 100 TG на TUSD</code>",
+                parse_mode='HTML'
+            )
+            return
+
+        await _create_order_internal(update, context, amount, from_token, to_token)
 
     except Exception as e:
         print(f"[obmen] FATAL: {e}", flush=True)
@@ -309,7 +377,7 @@ async def pay_command(update, context):
         traceback.print_exc()
 
 
-# ==================== /rain (/flashpay, /flash) ====================
+# ==================== /rain ====================
 async def rain_command(update, context):
     try:
         msg = update.effective_message
@@ -409,7 +477,8 @@ async def help_command(update, context):
     text = (
         "🤖 <b>КОМАНДЫ БОТА</b>\n\n"
         "🚀 /start — регистрация\n"
-        "🔄 /obmen 100 TG на TUSD — создать P2P-ордер\n"
+        "🔄 /order 100 TG TUSD — создать ордер (короткий формат)\n"
+        "🔄 /obmen 100 TG на TUSD — создать ордер (старый формат)\n"
         "💸 /pay 100 AI — перевести (ответом на сообщение)\n"
         "💸 /pay @user 100 AI — перевести по @username\n"
         "🌧 /rain 100 AI — дождь (раздать всем активным)\n"
@@ -584,7 +653,6 @@ async def handle_message(update, context):
         last_name  = msg.from_user.last_name or ''
         full_name  = (first_name + ' ' + last_name).strip() or None
 
-        # Синхронизируем имя в users, чтобы в топе не было «anon»
         try:
             supabase.rpc('ensure_user_exists', {
                 'p_telegram_id': user_id,
@@ -619,13 +687,20 @@ async def handle_message(update, context):
         if current >= notify_every:
             notify_counters[key] = 0
 
-            # Красивое сообщение с наградой + кнопка на WebApp
+            # Получаем актуальный баланс юзера по этому токену
+            try:
+                new_balance = get_token_balance(user_id, token)
+            except Exception as e:
+                print(f"[reward] balance fetch error: {e}", flush=True)
+                new_balance = 0
+
             nice_text = (
                 f"🎁 <b>НАГРАДА ЗА АКТИВНОСТЬ!</b>\n\n"
                 f"👤 <b>{first_name or 'Участник'}</b>\n"
                 f"💰 Получено: <b>+{reward} {token}</b>\n"
+                f"💼 Ваш баланс: <b>{new_balance:g} {token}</b>\n"
                 f"🔥 Продолжай в том же духе!\n\n"
-                f"⚡ <i>Открой приложение чтобы увидеть баланс</i>"
+                f"⚡ <i>Открой приложение чтобы увидеть все токены</i>"
             )
 
             try:
@@ -855,6 +930,8 @@ async def bot_main():
     telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler('start',    start_command))
     telegram_app.add_handler(CommandHandler('obmen',    obmen_command))
+    telegram_app.add_handler(CommandHandler('order',    order_command))
+    telegram_app.add_handler(CommandHandler('o',        order_command))
     telegram_app.add_handler(CommandHandler('pay',      pay_command))
     telegram_app.add_handler(CommandHandler('help',     help_command))
     telegram_app.add_handler(CommandHandler('top',      top_command))
